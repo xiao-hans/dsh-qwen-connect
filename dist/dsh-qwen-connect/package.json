@@ -36,6 +36,7 @@
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-host-webserver": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-llm": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-settings": "^0.1.2-rc.1",
     "@deepseek-ai/schemastery": "^3.18.2",
     "@earendil-works/pi-ai": ">=0.84.4 <0.86.0",

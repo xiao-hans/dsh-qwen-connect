@@ -224,7 +224,51 @@ function normalizeUser(u) {
     planName: u.planName ?? null,
     planId: u.planId ?? null,
     isBiz: u.isBiz ?? false,
+    // 企业 VPC 必需：WASM 签名载荷（generate_runtime_auth_fields 与
+    // QoderContext）依赖 organization_id / data_policy_agreed——缺失时
+    // 企业租户在 VPC 网关上得到 503 Model authorization unavailable
+    // （实测：补齐后目录/推理恢复 200）。auth-v2.dat 常缺这两个字段，
+    // 由 enrichUserForVpc() 兜底，这里先原样保留。
+    organizationId: u.organization_id ?? u.organizationId ?? null,
+    organizationTags: u.organization_tags ?? u.organizationTags ?? [],
+    dataPolicyAgreed: u.data_policy_agreed ?? u.dataPolicyAgreed ?? null,
   };
+}
+
+/**
+ * 读取千问 App 的运行态状态文件（~/.qwenworkcn/.status.json）。
+ * App 登录后会把 org_id 写在这里，而 auth-v2.dat 的 user 里没有——
+ * 企业 VPC 签名必需的 organization_id 由此兜底。
+ * @returns {object|null} 解析失败/不存在返回 null（绝不抛错）
+ */
+function readAppStatus() {
+  try {
+    const statusFile = path.join(os.homedir(), '.qwenworkcn', '.status.json');
+    if (!fs.existsSync(statusFile)) return null;
+    const json = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+    return typeof json === 'object' && json !== null ? json : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 补全企业 VPC 签名必需的用户字段（内存内 enrich，不写回凭据文件）：
+ *   - organizationId：凭据缺失时从 App 的 .status.json org_id 兜底；
+ *   - dataPolicyAgreed：缺失时默认 true（登录即同意数据处理是 App 的
+ *     事实语义；VPC 实测 Cosy-Data-Policy=agree 才能解锁模型授权）。
+ * @param {object} creds 规范化凭据（原地修改 user）
+ */
+function enrichUserForVpc(creds) {
+  if (!creds?.user) return creds;
+  const status = readAppStatus();
+  if (creds.user.organizationId == null && typeof status?.org_id === 'string' && status.org_id.length > 0) {
+    creds.user.organizationId = status.org_id;
+  }
+  if (creds.user.dataPolicyAgreed == null) {
+    creds.user.dataPolicyAgreed = true;
+  }
+  return creds;
 }
 
 function parseDate(v) {
@@ -291,12 +335,12 @@ function loadCredentialsSync(opts = {}) {
     }
     try {
       const raw = decryptCredentialsFile(file, masterKey);
-      return normalizeCredentials(raw, {
+      return enrichUserForVpc(normalizeCredentials(raw, {
         source: name === AUTH_V2_FILE ? 'auth-v2' : 'auth-v1',
         sourceFile: file,
         appDataDir: dir,
         masterKey,
-      });
+      }));
     } catch (e) {
       failures.push(e);
     }

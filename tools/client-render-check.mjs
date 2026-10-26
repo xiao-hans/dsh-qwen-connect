@@ -96,7 +96,9 @@ const ctx = {
     },
     register(meta, Component) {
       slotsRegistered.push({ meta, Component });
-      console.log(`✅ slots.register | slot=${meta.name} key=${meta.key} priority=${meta.priority}`);
+      const seat = meta.id ?? meta.key;
+      const order = meta.order ?? meta.priority;
+      console.log(`✅ slots.register | slot=${meta.name} seat=${seat} order=${order}`);
       return () => {};
     },
   },
@@ -115,13 +117,18 @@ try {
   process.exit(1);
 }
 
-if (slotsRegistered.length !== 1) {
-  console.error(`❌ 期望注册 1 个卡片，实际 ${slotsRegistered.length}`);
+if (slotsRegistered.length !== 2) {
+  console.error(`❌ 期望注册 2 个席位（设置卡片 + 输入框积分读数），实际 ${slotsRegistered.length}`);
   process.exit(1);
 }
 
 // ---- SSR 渲染：两种状态都要能渲染 ----
 const { Component, meta } = slotsRegistered[0];
+const composer = slotsRegistered.find((s) => s.meta.name === 'conversation.input.left');
+if (composer === undefined) {
+  console.error('❌ 未注册 conversation.input.left 积分读数');
+  process.exit(1);
+}
 const t = ctx.locale.bind('settings.qwenwork');
 const inject = meta.inject();
 
@@ -289,6 +296,84 @@ renderCase(
   [],
   ['<img'],
 );
+
+// ---------------------------------------------------------------------------
+// 输入框积分读数（conversation.input.left）：provider gate + 数字格式
+// SSR 不跑 useEffect，所以不会真的发请求；用 initialState 走与卡片同一开口。
+// ---------------------------------------------------------------------------
+
+console.log('\n--- 输入框积分读数 ---');
+
+const qwen = () => ({ next: { provider: 'qwenwork' } });
+const other = (p) => ({ next: { provider: p } });
+
+/** 渲染读数位；expected === '' 表示该场景必须整体不渲染。 */
+function composerCase(label, state, projection, mustContain = [], mustNotContain = []) {
+  try {
+    const html = server.renderToStaticMarkup(
+      react.createElement(composer.Component, { t, initialState: state, useProjection: projection }),
+    );
+    if (mustContain.length === 0 && mustNotContain.length === 0) {
+      if (html !== '') {
+        console.log(`  ❌ ${label}: 应当不渲染，实际输出 ${html.length} 字节`);
+        failures++;
+      } else {
+        console.log(`  ✅ ${label}: 正确不渲染`);
+      }
+      return html;
+    }
+    const missing = mustContain.filter((needle) => !html.includes(needle));
+    const leaked = mustNotContain.filter((needle) => html.includes(needle));
+    if (missing.length > 0 || leaked.length > 0) {
+      console.log(`  ❌ ${label}: 缺少 ${JSON.stringify(missing)} 不应出现 ${JSON.stringify(leaked)}`);
+      failures++;
+    } else {
+      console.log(`  ✅ ${label}: ${html.length} 字节`);
+    }
+    return html;
+  } catch (e) {
+    console.log(`  ❌ ${label} 抛异常: ${e.message}`);
+    failures++;
+    return '';
+  }
+}
+
+// 选中本 provider + 有积分：显示千分位数字，不显示警告样式
+composerCase(
+  '已登录（2092.36 → 2,092.4）',
+  { status: 'signed-in', remaining: 2092.36 },
+  qwen,
+  ['千问办公', '2,092.4'],
+  ['未登录', 'credits-warn'],
+);
+// 积分恰为 0：必须是 0，不能被当成「未登录」——写未登录会让人以为还能用
+composerCase(
+  '额度用尽（0）',
+  { status: 'signed-in', remaining: 0 },
+  qwen,
+  ['>0<'],
+  ['未登录', 'credits-warn'],
+);
+// 未登录 / 无积分字段：警告色占位，且不出现任何数字
+composerCase('未登录', { status: 'signed-out', error: { code: 'CREDENTIALS_MISSING' } }, qwen, [
+  '未登录',
+  'credits-warn',
+]);
+// entitlements 兜底路径
+composerCase('entitlements 兜底', { entitlements: [{ key: 'credits', remain: 12.5 }] }, qwen, ['12.5'], [
+  '未登录',
+]);
+// 选中别的 provider：整块不渲染（不能给兄弟插件的行留一个空位）
+composerCase('选中 workbuddy', { remaining: 100 }, () => other('workbuddy'));
+composerCase('选中 deepseek', { remaining: 100 }, () => other('deepseek'));
+// 新会话从未选过模型
+composerCase('投影为 null', { remaining: 100 }, () => null);
+composerCase('provider 为 null', { remaining: 100 }, () => ({ next: { provider: null } }));
+composerCase('next 缺省走 lastUsed', { remaining: 100 }, () => ({ lastUsed: { provider: 'qwenwork' } }), [
+  '100',
+]);
+// 宿主未注入 useProjection（离线/降级）时必须静默，不能抛进 DSH 的插槽渲染
+composerCase('无 useProjection', { remaining: 100 }, undefined);
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} 项检查失败`);

@@ -164,14 +164,21 @@ export async function createSignerSession(params) {
   // 复刻 AuthManager.regenerateRuntimeFields()：由 WASM 生成加密用户字段。
   // encrypt_user_info / key 必须与本载荷**同一次**调用的产物，下面的 QoderContext
   // 也只能用这一份结果（混用不同载荷的产物会让 Authorization 与用户信息互相矛盾）。
+  // 兼容两种 user 字段命名：credentials.js 新版产出 organizationId/dataPolicyAgreed
+  // （驼峰），旧凭据/外部构造的 credential 用 organization_id/data_policy_agreed
+  // （snake）。企业 VPC 租户缺这两个字段时 WASM 产出 disagree → 503
+  // Model authorization unavailable（实测修复依据）。
+  const organizationId = user.organization_id ?? user.organizationId ?? '';
+  const organizationTags = user.organization_tags ?? user.organizationTags ?? [];
+  const dataPolicyAgreed = user.data_policy_agreed ?? user.dataPolicyAgreed ?? false;
   const runtimeFields = JSON.parse(
     glue.generate_runtime_auth_fields(
       JSON.stringify({
         uid,
         security_oauth_token: securityOauthToken,
-        organization_id: user.organization_id ?? '',
-        organization_tags: user.organization_tags ?? [],
-        data_policy_agreed: user.data_policy_agreed ?? false,
+        organization_id: organizationId,
+        organization_tags: organizationTags,
+        data_policy_agreed: dataPolicyAgreed,
       }),
     ),
   );
@@ -187,9 +194,9 @@ export async function createSignerSession(params) {
       uid,
       encrypt_user_info: runtimeFields.encrypt_user_info,
       key: runtimeFields.key,
-      organization_id: user.organization_id ?? '',
-      organization_tags: user.organization_tags ?? [],
-      data_policy_agreed: user.data_policy_agreed ?? false,
+      organization_id: organizationId,
+      organization_tags: organizationTags,
+      data_policy_agreed: dataPolicyAgreed,
     }),
     JSON.stringify(CLIENT_METADATA),
   );

@@ -23,7 +23,12 @@ window.__ModuleLoader__.load({
     //#region status-paths.ts
     /** 与 lib/status-paths.js 保持一致（client 半无法 import host 模块）。 */
     const QWENWORK_STATUS_PATH = '/plugins/dsh-qwen-connect/status';
+    /** 与 lib/models.js 的 QWENWORK_PROVIDER 保持一致（同样无法 import host）。 */
+    const QWENWORK_PROVIDER = 'qwenwork';
     const POLL_INTERVAL_MS = 60000;
+    /** 输入框工具栏的积分读数单独用更长的轮询节奏——它是常驻的，不像卡片那样
+     *  只在展开时才拉取，60s 已足够，且省掉一半对状态接口的重复请求。 */
+    const COMPOSER_POLL_INTERVAL_MS = 60000;
     //#endregion
 
     //#region 样式
@@ -703,6 +708,137 @@ window.__ModuleLoader__.load({
       });
     }
 
+    //#region 输入框工具栏积分读数
+    /**
+     * 输入框工具栏（conversation.input.left）的常驻积分读数。
+     *
+     * 参照 dsh-connect-workbuddy / dsh-connect-trae 的同名实现：
+     *   · 插槽无条件注册，由 gate 读宿主自己的 modelSelection 投影决定是否
+     *     渲染 —— 只有本会话选中 qwenwork 时才显示，也不会启动拉取循环。
+     *     那行是 session 级 list 席位，多个连接器插件靠这个 gate 互不挤压。
+     *   · 用 next ?? lastUsed 判定当前 provider：切换后尚未发送也算「当前选中」，
+     *     与壳自己的优先级一致，读数不会和实际生效的模型不一致。
+     *   · 数据复用 /status（卡片同一个接口），不新增请求端点、不新增字段。
+     *
+     * 样式自己注入：卡片可能从未挂载（用户没进过设置页），但这行必须能出现，
+     * 所以不能依赖卡片那份 CSS。全部取壳的 token，随主题走。
+     */
+    const COMPOSER_CSS = `
+.dsm-qwenwork-composer-credits{display:inline-flex;align-items:center;min-width:0}
+.dsm-qwenwork-composer-credits-text{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:2px 6px;border-radius:6px;
+  font-size:12px;line-height:18px;
+  color:var(--dsw-alias-label-tertiary,#999);
+  white-space:nowrap;font-variant-numeric:tabular-nums;
+}
+.dsm-qwenwork-composer-credits-text:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14))}
+.dsm-qwenwork-composer-credits-name{overflow:hidden;text-overflow:ellipsis}
+.dsm-qwenwork-composer-credits-warn{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+`;
+    const COMPOSER_CSS_TAG = 'dsh-qwen-connect/composer-credits.css';
+    function ensureComposerCss() {
+      if (typeof document === 'undefined') return;
+      if (document.querySelector(`style[data-plugin-css=${JSON.stringify(COMPOSER_CSS_TAG)}]`) !== null) return;
+      const tag = document.createElement('style');
+      tag.dataset.plugin = 'dsh-qwen-connect';
+      tag.dataset.pluginCss = COMPOSER_CSS_TAG;
+      tag.textContent = COMPOSER_CSS;
+      document.head.appendChild(tag);
+    }
+
+    /** 从状态文档里取积分余额（与卡片同一套兜底：remaining 优先，其次 entitlements）。 */
+    function creditsOf(state) {
+      if (state === null || typeof state !== 'object') return undefined;
+      if (typeof state.remaining === 'number') return state.remaining;
+      const credits = Array.isArray(state.entitlements)
+        ? state.entitlements.find((e) => e !== null && typeof e === 'object' && e.key === 'credits')
+        : undefined;
+      return typeof credits?.remain === 'number' ? credits.remain : undefined;
+    }
+
+    /**
+     * 当前会话选中的 provider（next 优先于 lastUsed）。
+     * 形状与 workbuddy 的 selectedProviderOf 一致：宿主投影可能给 null/非字符串。
+     */
+    function selectedProviderOf(projection) {
+      const provider = (projection?.next ?? projection?.lastUsed)?.provider;
+      return typeof provider === 'string' && provider !== '' ? provider : undefined;
+    }
+
+    function ComposerCredits(props) {
+      const t = props.t;
+      // 宿主在 session 级插槽上注入 useProjection（见 dsh-client-ui-renderer 的
+      // standardProps）；离线渲染检查不会传，故缺省时不渲染而不是抛。
+      const useProjection = props.useProjection;
+      // 与卡片同一约定：initialState 只服务于离线渲染检查（SSR 不跑 effect，
+      // 没有这个口子就没法验证「有积分」那一支的输出）。
+      const [state, setState] = react.useState(props.initialState ?? null);
+
+      ensureComposerCss();
+
+      const projection = useProjection === void 0 ? undefined : useProjection('modelSelection');
+      const provider = selectedProviderOf(projection);
+      const mine = provider === QWENWORK_PROVIDER;
+
+      react.useEffect(() => {
+        // 只有选中本 provider 才拉数据：别的 provider 下这行不存在，也不该有后台请求。
+        if (!mine) return undefined;
+        let cancelled = false;
+        let timer = undefined;
+
+        async function load() {
+          try {
+            const response = await fetch(QWENWORK_STATUS_PATH, {
+              headers: { accept: 'application/json' },
+              credentials: 'same-origin',
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const body = await response.json();
+            if (!cancelled) setState(body);
+          } catch {
+            // 读数位不显示错误文案（卡片里看得到就行），保留上一次的值更安静。
+          }
+        }
+
+        load();
+        timer = setInterval(load, COMPOSER_POLL_INTERVAL_MS);
+        return () => {
+          cancelled = true;
+          if (timer !== undefined) clearInterval(timer);
+        };
+      }, [mine]);
+
+      if (!mine) return null;
+
+      const credits = creditsOf(state);
+      // 未登录 / 无积分字段：显示占位而不是 0 —— 写 0 会让人以为额度用光了。
+      const body =
+        credits === undefined
+          ? react_jsx_runtime.jsx('span', {
+              className: 'dsm-qwenwork-composer-credits-warn',
+              children: t('creditsUnavailable'),
+            })
+          : react_jsx_runtime.jsx('span', { children: formatNumber(credits) });
+
+      return react_jsx_runtime.jsx('div', {
+        className: 'dsm-qwenwork-composer-credits',
+        title: t('composerTooltip'),
+        children: react_jsx_runtime.jsxs('span', {
+          className: 'dsm-qwenwork-composer-credits-text',
+          children: [
+            react_jsx_runtime.jsx('span', {
+              className: 'dsm-qwenwork-composer-credits-name',
+              children: t('title'),
+            }),
+            react_jsx_runtime.jsx('span', { children: '·' }),
+            body,
+          ],
+        }),
+      });
+    }
+    //#endregion
+
     //#region 文案
     const zh = {
       title: '千问办公',
@@ -751,6 +887,9 @@ window.__ModuleLoader__.load({
       badgeDefault: '默认',
       badgeRecommended: '推荐',
       badgeNew: '新',
+      // 输入框工具栏积分读数
+      creditsUnavailable: '未登录',
+      composerTooltip: '千问办公剩余积分 · 打开「设置 → 插件 → 千问办公」查看详情',
     };
     const en = {
       title: 'QwenWork',
@@ -793,6 +932,9 @@ window.__ModuleLoader__.load({
       badgeDefault: 'Default',
       badgeRecommended: 'Recommended',
       badgeNew: 'New',
+      // 输入框工具栏积分读数
+      creditsUnavailable: 'Signed out',
+      composerTooltip: 'QwenWork credits remaining · see Settings → Plugins → QwenWork',
     };
     //#endregion
 
@@ -824,6 +966,28 @@ window.__ModuleLoader__.load({
             QwenWorkPluginCard,
           ),
         );
+        // 输入框工具栏的积分读数。注册本身无条件，渲染与否由 ComposerCredits
+        // 内部的 provider gate 决定（见该组件注释），所以这里再包一层 try/catch
+        // 兜住「插槽席位不存在/字段变更」——不能因为它挂了就连带卡片也不显示。
+        try {
+          ctx.slots.inject('conversation.input.left', () =>
+            ctx.slots.register(
+              {
+                name: 'conversation.input.left',
+                id: 'dsh-qwen-connect-composer-credits',
+                order: 4,
+                locale: namespace,
+                inject: () => ({ t }),
+              },
+              ComposerCredits,
+            ),
+          );
+        } catch (error) {
+          console.error(
+            '[dsh-qwen-connect] composer credits slot failed to register (host provider unaffected):',
+            error,
+          );
+        }
       } catch (error) {
         console.error(
           '[dsh-qwen-connect] client card failed to load (host provider unaffected):',

@@ -101,14 +101,28 @@ const ctx = {
 
 mod.apply(ctx);
 
-assert.equal(registrations.length, 1, '必须恰好注册一个卡片');
-const { descriptor, component } = registrations[0];
+assert.equal(registrations.length, 2, '必须注册两个席位：设置卡片 + 输入框积分读数');
+const card = registrations.find((r) => r.descriptor.name === 'settings.plugin.item');
+const credits = registrations.find((r) => r.descriptor.name === 'conversation.input.left');
+assert.ok(card !== undefined, '必须注册到插件设置页的 slot');
+assert.ok(credits !== undefined, '必须注册到输入框工具栏的积分读数');
+
+const { descriptor, component } = card;
 line(`✔ slot 注册: name=${descriptor.name} key=${descriptor.key} priority=${descriptor.priority}`);
 
-assert.equal(descriptor.name, 'settings.plugin.item', '必须注册到插件设置页的 slot');
 assert.equal(descriptor.key, 'qwenwork', '0.1.2 用 key（而非旧版 id）');
 assert.equal(typeof descriptor.priority, 'number', '0.1.2 用 priority（而非旧版 order）');
 assert.equal(typeof component, 'function', '第二参数必须是组件函数');
+
+// 积分读数席位：本机 runtime（0.2.1-rc.2）的 conversation.input.left 用 id/order，
+// 与 dsh-connect-workbuddy、dsh-connect-trae 的同名席位一致。
+line(
+  `✔ slot 注册: name=${credits.descriptor.name} id=${credits.descriptor.id} order=${credits.descriptor.order}`,
+);
+assert.equal(typeof credits.descriptor.id, 'string', '积分读数席位要有稳定 id');
+assert.equal(typeof credits.descriptor.order, 'number', '积分读数席位要有 order');
+assert.equal(credits.descriptor.locale, 'settings.qwenwork', '积分读数要走本插件的文案命名空间');
+assert.equal(typeof credits.component, 'function', '积分读数的第二参数必须是组件函数');
 
 assert.ok(localeRegistered !== null, '必须注册文案');
 line(`✔ locale: ns=${localeRegistered.ns} 语言=${Object.keys(localeRegistered.copy).join('/')}`);

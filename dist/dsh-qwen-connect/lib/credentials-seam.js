@@ -228,18 +228,29 @@ export async function getValidCredential(opts) {
 /**
  * 聚合账号上下文（user / plan / quota），形状与卡片后端约定一致。
  *
+ * baseUrl 注入：调用方未显式给 baseUrl 时，从刷新后的凭据派生网关
+ * （resolveGatewayEndpoint：JWT iss 含 .vpc. → 租户网关；否则公有云
+ * 缺省）。企业 VPC 租户的 token 打公有云会 401 INVALID_TOKEN，因此
+ * 注入必须发生在 fetchAccountOverview 之前。
+ *
  * @param {object} [opts]
  * @returns {Promise<any>}
  */
-export async function getAccountContext(opts) {
+export async function getAccountContext(opts = {}) {
   const loaded = await loadImplementation();
   if (loaded === null) throw notWired('getAccountContext()');
 
-  const token = await getValidToken(opts);
+  const credential = await getValidCredential(opts);
+  const token = typeof credential?.token === 'string' ? credential.token : unwrapToken(credential);
   if (typeof loaded.rest?.fetchAccountOverview !== 'function') {
     throw notWired('fetchAccountOverview()');
   }
-  return loaded.rest.fetchAccountOverview(token, opts);
+  const { resolveGatewayEndpoint, relaxTlsForVpc } = await import('./endpoint.js');
+  const baseUrl = opts.baseUrl ?? resolveGatewayEndpoint(
+    typeof credential === 'object' && credential !== null && credential.token ? credential : { token },
+  );
+  relaxTlsForVpc(baseUrl);
+  return loaded.rest.fetchAccountOverview(token, { ...opts, baseUrl });
 }
 
 /**
