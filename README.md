@@ -3,6 +3,23 @@
 把**千问办公（QwenWorkCN）桌面 App** 的登录态自动接入 DeepSeek Harness ——
 零配置，不需要 API Key，不需要另外登录。
 
+> **来源说明**：本仓库衍生自
+> [gaoqiaoliangjie666/dsh-qwen-connect](https://github.com/gaoqiaoliangjie666/dsh-qwen-connect)——
+> 原始设计与协议逆向 / WASM 签名成果归属上游作者（MIT 许可）。
+> 本仓库在其基础上追加（提交 `e3ab432`，2026-10）：
+>
+> - **企业 VPC 租户支持**：凭据 JWT `iss` 自动派生租户网关（`lib/endpoint.js`）、
+>   `organization_id` / `data_policy_agreed` 补齐（修复 VPC 恒定 503）、
+>   shim / seam 端点随凭据动态解析，公有云账号零行为变化；
+> - **输入框实时积分读数**：DSH 会话输入栏插槽显示剩余积分（`lib/client.js`）；
+> - **DSH 0.2.x 兼容性修复**：补齐 `@deepseek-ai/dsh-llm-pi-ai` peer 声明——
+>   缺失时装载期 import 被判为原生解析而失败，provider 静默不注册。
+>
+> 双端镜像：GitHub 本仓库 ↔ Gitee
+> <https://gitee.com/han-xiaos-whisper/dsh-qwen-connect>；
+> 姊妹项目（同一推理链的 Pi 编码代理宿主版）：
+> <https://github.com/xiao-hans/pi-provider-qwenwork>。
+
 ## 它做什么
 
 | 能力 | 状态 |
