@@ -1,11 +1,20 @@
 {
-  "name": "dsh-qwen-connect",
+  "name": "@xiao-hans/dsh-qwen-connect",
   "displayName": "DSH Qwen Work Connect",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "DSH 插件：复用 QwenWorkCN（千问办公）桌面 App 登录态，零配置接入 DSH",
   "main": "lib/index.js",
+  "files": [
+    "lib/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -25,6 +34,22 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiao-hans/dsh-qwen-connect.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiao-hans/dsh-qwen-connect/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "qwenwork",
+    "qwen",
+    "llm-provider",
+    "mcp",
+    "openai-compatible"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
