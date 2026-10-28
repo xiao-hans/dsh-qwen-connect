@@ -192,8 +192,9 @@ Copy-Item "$w\_backup-qwen-connect-20260911-141226\cordis.patch.yml" "$w\cordis.
 4. **模型目录是静态的**：`/api/v2/model/list` 需要 WASM 签名（403），
    目前用内置的三模型目录，不动态拉取。
 5. **`quota.total` 对 Free 套餐为 null**：卡片按「未提供」处理，不显示 0%。
-6. **签名依赖官方 WASM**：`research/wasm.bin` 是从 App 产物提取的签名模块，
-   **不随插件发布**；换机器需重新提取（`node research/wasm-extract.mjs`）。
+6. **签名依赖官方 WASM**：`research/wasm.bin` 是从官方 App 产物提取的签名模块，
+   由 `package.json` 的 `files` 字段**随包发布**（npm 包与 dist 包内都带），换机器
+   无需重新提取；需要整体重提时用 `node research/wasm-extract.mjs`。
 7. **`Cosy-Version` 动态解析**：优先读 App 产物里 SDK 的 `COSY_VERSION`
    常量（实测 `1.1.32`），失败时回退安装目录版本号，最后回退常量。
    来源会记在 `signerSession.describe().cosyVersion.source` 里。
