@@ -1,5 +1,5 @@
 {
-  "name": "@xiao-hans/dsh-qwen-connect",
+  "name": "dsh-qwen-connect",
   "displayName": "DSH Qwen Work Connect",
   "version": "0.1.1",
   "type": "module",
@@ -12,7 +12,6 @@
     "LICENSE"
   ],
   "publishConfig": {
-    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "exports": {
