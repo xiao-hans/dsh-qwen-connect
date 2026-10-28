@@ -132,26 +132,29 @@ nickname: Test User   account: testuser01   remaining: 2100   tierName: Free
 ```powershell
 $d = "E:\Codex开发\DHS开发\dsh-qwen-connect"
 $w = "$env:APPDATA\dsh-desktop\harness\profiles\web"
+$pkg = "@xiao-hans/dsh-qwen-connect"
 
-# 1) 依赖桥：让 peer 依赖可解析（源码目录不在 profiles 树下）
+# 1) 依赖桥：让 CLI 侧自检可解析（运行时解析由 DSH 宿主接管，非必需）
 foreach ($ns in @("@deepseek-ai", "@earendil-works")) {
   cmd /c mklink /J "$d\node_modules\$ns" `
          "$env:APPDATA\dsh-desktop\harness\profiles\node_modules\$ns"
 }
 
-# 2) 挂进 profile
-cmd /c mklink /J "$w\node_modules\dsh-qwen-connect" "$d"
+# 2) 挂进 profile（scoped 包：junction 放在 node_modules\@xiao-hans\ 下）
+New-Item -ItemType Directory -Force "$w\node_modules\@xiao-hans" | Out-Null
+cmd /c mklink /J "$w\node_modules\$pkg" "$d"
 
-# 3) 在 profile 的 package.json 里登记
-#    dependencies: "dsh-qwen-connect": "file:./node_modules/dsh-qwen-connect"
-#    dsh.profile.bundles: "dsh-qwen-connect"
+# 3) 在 profile 的 package.json 里登记（三处，包名用 scoped 全名）
+#    dependencies:      "@xiao-hans/dsh-qwen-connect": "file:./node_modules/@xiao-hans/dsh-qwen-connect"
+#    dsh.profile.bundles: "@xiao-hans/dsh-qwen-connect"
+#    pnpm.overrides:    "@xiao-hans/dsh-qwen-connect": "link:./node_modules/@xiao-hans/dsh-qwen-connect"
 ```
 
 ### 回滚
 
 ```powershell
 $w = "$env:APPDATA\dsh-desktop\harness\profiles\web"
-cmd /c rmdir "$w\node_modules\dsh-qwen-connect"
+cmd /c rmdir "$w\node_modules\@xiao-hans\dsh-qwen-connect"
 cmd /c rmdir "E:\Codex开发\DHS开发\dsh-qwen-connect\node_modules\@deepseek-ai"
 cmd /c rmdir "E:\Codex开发\DHS开发\dsh-qwen-connect\node_modules\@earendil-works"
 # 再用备份覆盖 profile 配置

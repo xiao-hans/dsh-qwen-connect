@@ -1,7 +1,7 @@
 {
-  "name": "dsh-qwen-connect",
+  "name": "@xiao-hans/dsh-qwen-connect",
   "displayName": "DSH Qwen Work Connect",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "DSH 插件：复用 QwenWorkCN（千问办公）桌面 App 登录态，零配置接入 DSH",
   "main": "lib/index.js",
@@ -12,7 +12,8 @@
     "LICENSE"
   ],
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "exports": {
     ".": "./lib/index.js",

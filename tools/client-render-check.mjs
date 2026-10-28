@@ -10,16 +10,33 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, '..');
 const require = createRequire(import.meta.url);
 
-// 定位 react 与 react-dom：优先本包，其次 DSH 的 profile node_modules。
+// 定位 react 与 react-dom：优先本包，其次 DSH 的 profile node_modules，
+// 再次本机 npm 缓存里带 react 的依赖树（无 DSH 环境的开发机兜底）。
+// 可用 DSH_REACT_MODULES=<node_modules 目录> 显式指定。
 function loadDep(name) {
+  const roots = [];
+  if (process.env.DSH_REACT_MODULES) roots.push(process.env.DSH_REACT_MODULES);
+  const roaming = process.env.APPDATA ?? path.join(process.env.USERPROFILE ?? '', 'AppData', 'Roaming');
+  roots.push(path.join(roaming, 'dsh-desktop', 'harness', 'profiles', 'node_modules'));
+  roots.push(
+    path.join(process.env.USERPROFILE ?? '', '.dsh', 'profiles', 'node_modules'),
+    path.join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx', '1e7f6d9597241db0', 'node_modules'),
+  );
+  let lastError;
   try {
     return require(name);
-  } catch {
-    const roaming = process.env.APPDATA ?? path.join(process.env.USERPROFILE ?? '', 'AppData', 'Roaming');
-    const dshModules = path.join(roaming, 'dsh-desktop', 'harness', 'profiles', 'node_modules');
-    const req2 = createRequire(path.join(dshModules, 'noop.js'));
-    return req2(name);
+  } catch (error) {
+    lastError = error;
   }
+  for (const root of roots) {
+    try {
+      const req2 = createRequire(path.join(root, 'noop.js'));
+      return req2(name);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 let react, jsxRuntime, server;

@@ -4,4 +4,4 @@
 # stored by DSH itself.
 - insert:
     - id: llm-qwenwork
-      name: dsh-qwen-connect
+      name: "@xiao-hans/dsh-qwen-connect"

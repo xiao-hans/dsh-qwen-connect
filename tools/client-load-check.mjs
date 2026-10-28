@@ -51,7 +51,10 @@ evaluate(windowStub);
 
 assert.ok(loaded !== null, 'client.js 必须调用 window.__ModuleLoader__.load()');
 line(`✔ 调用了 __ModuleLoader__.load()，id = ${loaded.id}`);
-assert.equal(loaded.id, 'dsh-qwen-connect', 'id 必须与包名一致');
+// 宿主契约：client 模块 id 必须等于 package.json 的 name（scoped 名同样成立）。
+// 断言直接从 manifest 读，改名不再需要同步这个文件。
+const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+assert.equal(loaded.id, manifest.name, 'id 必须与包名一致');
 assert.equal(typeof loaded.factory, 'function', 'factory 必须是函数');
 
 // ---- 执行 factory ---------------------------------------------------------

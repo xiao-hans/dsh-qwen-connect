@@ -56,7 +56,7 @@ node tools/install-to-dsh.mjs --uninstall
 1. 打开 **设置 → 插件**，应看到「千问办公」卡片，显示账号 / 积分 / 套餐 / 三个模型
 2. 打开**模型选择器**，应有 `QwenWork` 提供方的三个模型：
    - `pro`（高级，1.00x）
-   - `flash`（标准，0.10x，最便宜）
+   - `qwen3.8-flash`（标准，0.10x，最便宜）
    - `qwen3.8-max-preview`（Qwen3.8-Max，1.10x）
 3. 选 `pro` 发一条消息试对话
 
@@ -65,15 +65,15 @@ node tools/install-to-dsh.mjs --uninstall
 DSH 插件需要**三个登记点**同时存在才会被加载：
 
 ```
-dependencies     { "dsh-qwen-connect": "file:./node_modules/dsh-qwen-connect" }
-dsh.profile.bundles  [ ..., "dsh-qwen-connect" ]
-pnpm.overrides   { "dsh-qwen-connect": "link:./node_modules/dsh-qwen-connect" }
+dependencies     { "@xiao-hans/dsh-qwen-connect": "file:./node_modules/@xiao-hans/dsh-qwen-connect" }
+dsh.profile.bundles  [ ..., "@xiao-hans/dsh-qwen-connect" ]
+pnpm.overrides   { "@xiao-hans/dsh-qwen-connect": "link:./node_modules/@xiao-hans/dsh-qwen-connect" }
 ```
 
-外加一个 Junction：
+外加一个 Junction（scoped 包放在作用域目录下）：
 
 ```
-profiles\web\node_modules\dsh-qwen-connect
+profiles\web\node_modules\@xiao-hans\dsh-qwen-connect
         → 本目录（真实源码位置）
 ```
 

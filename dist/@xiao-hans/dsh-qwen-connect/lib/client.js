@@ -11,7 +11,7 @@
  */
 
 window.__ModuleLoader__.load({
-  id: 'dsh-qwen-connect',
+  id: '@xiao-hans/dsh-qwen-connect',
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
@@ -741,7 +741,7 @@ window.__ModuleLoader__.load({
       if (typeof document === 'undefined') return;
       if (document.querySelector(`style[data-plugin-css=${JSON.stringify(COMPOSER_CSS_TAG)}]`) !== null) return;
       const tag = document.createElement('style');
-      tag.dataset.plugin = 'dsh-qwen-connect';
+      tag.dataset.plugin = '@xiao-hans/dsh-qwen-connect';
       tag.dataset.pluginCss = COMPOSER_CSS_TAG;
       tag.textContent = COMPOSER_CSS;
       document.head.appendChild(tag);
@@ -938,7 +938,7 @@ window.__ModuleLoader__.load({
     };
     //#endregion
 
-    const name = 'dsh-qwen-connect';
+    const name = '@xiao-hans/dsh-qwen-connect';
     const inject = ['slots', 'locale'];
 
     /**
