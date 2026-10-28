@@ -203,6 +203,28 @@ test('凭据错误降级为 signed-out 且不下发 token', async () => {
 
 // ---------------------------------------------------------------- 组装
 
+test('可重试的上游错误（VPC quota 503）判 signed-in + degraded，不误报未登录', async () => {
+  // 回归测试（2026-10-28 事故）：企业 VPC 的 account-context 间歇 503
+  // quota-unavailable 时，token 有效、对话可用，状态不得判 signed-out
+  // （否则输入框读数显示「未登录」误导用户）。
+  const status = await qwenWorkWebStatus({
+    getAccountContext: async () => {
+      const err = new Error('HTTP 503 {"code":"quota-unavailable","msg":"Quota unavailable"}');
+      err.code = 'API_ERROR';
+      err.retryable = true;
+      throw err;
+    },
+    tokenAvailable: async () => true,
+    models: () => [],
+    provider: 'qwenwork',
+  });
+  assert.equal(status.status, 'signed-in', '可重试错误不得降级为未登录');
+  assert.equal(status.degraded, true);
+  assert.equal(status.error?.code, 'API_ERROR');
+  assert.equal(status.error?.retryable, true, 'retryable 必须透传给客户端');
+  assert.ok(!('remaining' in status), '无数据时不得出现积分字段');
+});
+
 test('null 额度字段不得被 Number(null) 变成 0（防编造数值）', async () => {
   // 回归测试：t1 在字段缺失时返回 null。若直接 Number(null) 会得到 0，
   // 卡片就会显示「已用 0 / 总额 0」这种上游从未给出的数字。

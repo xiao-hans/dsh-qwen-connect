@@ -376,6 +376,15 @@ composerCase('未登录', { status: 'signed-out', error: { code: 'CREDENTIALS_MI
   '未登录',
   'credits-warn',
 ]);
+// 登录着但上游额度接口暂时失败（VPC quota 间歇 503）：说「积分暂不可用」，
+// 绝不能说「未登录」——此时对话完全可用（2026-10-28 误报事故回归）。
+composerCase(
+  'degraded（signed-in 无积分）',
+  { status: 'signed-in', degraded: true, error: { code: 'API_ERROR', retryable: true } },
+  qwen,
+  ['积分暂不可用', 'credits-warn'],
+  ['未登录'],
+);
 // entitlements 兜底路径
 composerCase('entitlements 兜底', { entitlements: [{ key: 'credits', remain: 12.5 }] }, qwen, ['12.5'], [
   '未登录',

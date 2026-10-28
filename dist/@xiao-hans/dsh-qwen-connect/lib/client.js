@@ -812,14 +812,23 @@ window.__ModuleLoader__.load({
       if (!mine) return null;
 
       const credits = creditsOf(state);
-      // 未登录 / 无积分字段：显示占位而不是 0 —— 写 0 会让人以为额度用光了。
+      // 无积分字段时分两种占位：登录着但上游额度接口暂时失败（degraded，
+      // 例如企业 VPC quota 后端间歇 503）说「积分暂不可用」；真未登录才说
+      // 「未登录」。写 0 会让人以为额度用光了，也一律避免。
       const body =
-        credits === undefined
-          ? react_jsx_runtime.jsx('span', {
-              className: 'dsm-qwenwork-composer-credits-warn',
-              children: t('creditsUnavailable'),
-            })
-          : react_jsx_runtime.jsx('span', { children: formatNumber(credits) });
+        credits !== undefined ? (
+          react_jsx_runtime.jsx('span', { children: formatNumber(credits) })
+        ) : state?.status === 'signed-in' ? (
+          react_jsx_runtime.jsx('span', {
+            className: 'dsm-qwenwork-composer-credits-warn',
+            children: t('creditsDegraded'),
+          })
+        ) : (
+          react_jsx_runtime.jsx('span', {
+            className: 'dsm-qwenwork-composer-credits-warn',
+            children: t('creditsUnavailable'),
+          })
+        );
 
       return react_jsx_runtime.jsx('div', {
         className: 'dsm-qwenwork-composer-credits',
@@ -889,6 +898,7 @@ window.__ModuleLoader__.load({
       badgeNew: '新',
       // 输入框工具栏积分读数
       creditsUnavailable: '未登录',
+      creditsDegraded: '积分暂不可用',
       composerTooltip: '千问办公剩余积分 · 打开「设置 → 插件 → 千问办公」查看详情',
     };
     const en = {
@@ -934,6 +944,7 @@ window.__ModuleLoader__.load({
       badgeNew: 'New',
       // 输入框工具栏积分读数
       creditsUnavailable: 'Signed out',
+      creditsDegraded: 'Quota unavailable',
       composerTooltip: 'QwenWork credits remaining · see Settings → Plugins → QwenWork',
     };
     //#endregion
