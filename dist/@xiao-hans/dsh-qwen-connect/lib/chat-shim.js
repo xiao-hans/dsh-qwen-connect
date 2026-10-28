@@ -688,6 +688,10 @@ export function createChatShimHandler(deps) {
     let firstContentAt = null;
     /** 累加的正文长度（不含思考链）——速率只看正文，否则思考会虚高。 */
     let outputChars = 0;
+    /** 累加的思考链长度：只思考不回答的回合要靠它区分「有产出」与「空回合」。 */
+    let thinkingChars = 0;
+    /** 本回合是否已下发工具调用分片（有它就算有产出）。 */
+    let toolCallsEmitted = false;
     // ---- 「200 之后的静默」放弃计时器 ----
     // 上游拿到 200 后若在 FIRST_CONTENT_TIMEOUT_MS 内**任何帧都没发**
     // （reasoning 或 content 都算帧），就视为排队失败，主动放弃并报错。
@@ -759,15 +763,41 @@ export function createChatShimHandler(deps) {
           }
           outputChars += frame.delta.content.length;
         }
+        if (typeof frame.delta.reasoning === 'string' && frame.delta.reasoning !== '') {
+          thinkingChars += frame.delta.reasoning.length;
+        }
+        if (Array.isArray(frame.delta.tool_calls) && frame.delta.tool_calls.length > 0) {
+          toolCallsEmitted = true;
+        }
         write(encodeOpenAiChunk({ model: modelKey, id: chunkId, created, delta: frame.delta }));
       }
       if (frame.finishReason !== null && frame.finishReason !== undefined) {
+        // 上游常把「带工具调用」的回合标成 stop。下游（pi-ai / DSH）靠
+        // finish_reason 判断要不要继续跑工具，标成 stop 就等于告诉它「本轮结束了」，
+        // agent 循环于是停在工具调用前面——表现为「模型不动了」。
+        let reason = frame.finishReason;
+        if (toolCallsEmitted && (reason === 'stop' || reason === 'end')) reason = 'tool_calls';
+        // 只思考不回答（reasoning 一大堆、正文和工具调用都没有）：这是一次
+        // 空回合。报成 stop 会让下游拿到一条空 assistant 消息就收工；
+        // 报错才能让它重试——实测过 340 秒思考、9.5 万字符思考链、0 正文。
+        if (!toolCallsEmitted && outputChars === 0) {
+          trace('empty-answer', { ms: Date.now() - reqT0, thinkingChars });
+          write(
+            `data: ${JSON.stringify({
+              error: {
+                message: `upstream finished without any answer (thinking ${thinkingChars} chars, no content, no tool calls)`,
+                type: 'empty_answer',
+              },
+            })}\n\n`,
+          );
+          reason = 'network_error';
+        }
         write(
           encodeOpenAiChunk({
             model: modelKey,
             id: chunkId,
             created,
-            finishReason: frame.finishReason,
+            finishReason: reason,
             usage,
           }),
         );
@@ -780,20 +810,27 @@ export function createChatShimHandler(deps) {
 
     const idleTimer = { current: null };
     let idleFired = false;
-    const armIdle = () => {
+    /**
+     * 看门狗。deadlineMs 决定这一轮允许静默多久：
+     *   - 首帧之前用 FIRST_CONTENT_TIMEOUT_MS（90s）：拿到 200 却久久没有任何帧，
+     *     是上游「接了单没排上」的排队态，干等 300 秒只是把失败拉长；
+     *   - 首帧之后用 idleTimeoutMs（300s）：长思考时上游仍在持续推 reasoning 帧。
+     * 这个常量此前只有声明和注释、未被任何代码使用，等于首帧预算形同虚设。
+     */
+    const armIdle = (deadlineMs = idleTimeoutMs) => {
       clearTimeout(idleTimer.current);
       idleTimer.current = setTimeout(() => {
         // ⚠️ 关键：必须**先给客户端一个明确结果**，再收摊。
         // 只设 clientGone 会让后续所有 write 被跳过，客户端一个字节都收不到
         // → 界面永久转圈（表现为"卡住"，比报错更难排查）。
         idleFired = true;
-        trace('idle-watchdog-fired', { ms: Date.now() - reqT0, idleTimeoutMs });
+        trace('idle-watchdog-fired', { ms: Date.now() - reqT0, deadlineMs });
         if (!res.writableEnded) {
           try {
             res.write(
               `data: ${JSON.stringify({
                 error: {
-                  message: `upstream produced no data for ${idleTimeoutMs}ms`,
+                  message: `upstream produced no data for ${deadlineMs}ms`,
                   type: 'api_error',
                 },
               })}\n\n`,
@@ -815,11 +852,12 @@ export function createChatShimHandler(deps) {
         } catch {
           /* 已中止 */
         }
-      }, idleTimeoutMs);
+      }, deadlineMs);
     };
 
     try {
-      armIdle();
+      // 首帧预算更紧：排队态的 200 会先到、随后长时间零字节。
+      armIdle(FIRST_CONTENT_TIMEOUT_MS);
       const decoder = new TextDecoder('utf-8');
       for await (const chunk of upstream.body) {
         if (clientGone) break;
@@ -854,15 +892,43 @@ export function createChatShimHandler(deps) {
           write(SSE_DONE);
         } else {
           if (!finished) {
-            write(
-              encodeOpenAiChunk({
-                model: modelKey,
-                id: chunkId,
-                created,
-                finishReason: 'stop',
-                usage,
-              }),
-            );
+            // ⚠️ 上游没给 finish 帧就结束了：这是**被截断**的回合，不是正常收尾。
+            // 补一个 `stop` 会让下游把「被切断的回答」当成「模型自己讲完了」，
+            // agent 循环就此静默终止——用户看到的正是「模型突然不动了」。
+            //   有产出(正文/工具调用) → `length`：客户端知道被截断，可续写/重试
+            //   毫无产出(只有思考)     → 错误帧 + `network_error`：让下游重试整轮
+            // 两种情况都必须给下游一个明确的结束信号，不能挂起。
+            if (outputChars > 0 || toolCallsEmitted) {
+              trace('truncated', { ms: Date.now() - reqT0, outputChars, thinkingChars });
+              write(
+                encodeOpenAiChunk({
+                  model: modelKey,
+                  id: chunkId,
+                  created,
+                  finishReason: 'length',
+                  usage,
+                }),
+              );
+            } else {
+              trace('empty-answer', { ms: Date.now() - reqT0, thinkingChars });
+              write(
+                `data: ${JSON.stringify({
+                  error: {
+                    message: `upstream ended without any answer (thinking ${thinkingChars} chars, no content, no tool calls)`,
+                    type: 'empty_answer',
+                  },
+                })}\n\n`,
+              );
+              write(
+                encodeOpenAiChunk({
+                  model: modelKey,
+                  id: chunkId,
+                  created,
+                  finishReason: 'network_error',
+                  usage,
+                }),
+              );
+            }
           } else if (usage !== null) {
             // finish 帧已经发过、usage 是随后才到的：补一帧只带 usage 的分块。
             // OpenAI 的约定是 usage 出现在最后一个 chunk 上（choices 可为空）。
@@ -885,6 +951,18 @@ export function createChatShimHandler(deps) {
       log.warn?.('dsh-qwen-connect: upstream stream interrupted', safeMessage(error));
       if (!clientGone) {
         write(`data: ${JSON.stringify({ error: { message: safeMessage(error), type: 'api_error' } })}\n\n`);
+        // ⚠️ 断流也要给 finish 帧。只发错误帧 + [DONE] 时，有的下游会把「没有
+        // finish_reason」当成「流异常结束但内容正常」，有的则报 EMPTY_RESPONSE；
+        // 已产出内容就说 length（被截断），一个字节都没出就说 network_error。
+        write(
+          encodeOpenAiChunk({
+            model: modelKey,
+            id: chunkId,
+            created,
+            finishReason: outputChars > 0 || toolCallsEmitted ? 'length' : 'network_error',
+            usage,
+          }),
+        );
         write(SSE_DONE);
       }
     } finally {

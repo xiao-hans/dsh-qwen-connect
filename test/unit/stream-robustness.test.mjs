@@ -682,6 +682,12 @@ test('shim: 上游中途断连 —— 不挂起、发出错误帧并以 [DONE] �
     const frames = await collectSse(res);
     assert.ok(frames.length >= 1, 'should still receive the early frame');
     assert.equal(frames.at(-1), '[DONE]', 'must terminate with [DONE] so the client does not hang');
+    // 已被截断的回合必须说「被截断」：补一个 stop 会让下游把断流当成模型自己讲完了。
+    const finish = frames
+      .filter((f) => f !== '[DONE]')
+      .map((f) => JSON.parse(f).choices?.[0]?.finish_reason)
+      .filter(Boolean);
+    assert.deepEqual(finish, ['length']);
   } finally {
     await shim.close();
     upstream.server.close();
@@ -699,8 +705,11 @@ test('shim: 上游不发任何帧就结束 —— 仍以 finish+[DONE] 收尾', 
     });
     const frames = await collectSse(res);
     assert.equal(frames.at(-1), '[DONE]');
-    const finish = frames.filter((f) => f !== '[DONE]').map((f) => JSON.parse(f).choices[0].finish_reason).filter(Boolean);
-    assert.deepEqual(finish, ['stop']);
+    // 完全没有产出：既不是 stop，也不该挂起——错误帧 + network_error 让下游重试。
+    const parsed = frames.filter((f) => f !== '[DONE]').map((f) => JSON.parse(f));
+    assert.ok(parsed.some((c) => c.error?.type === 'empty_answer'), 'an empty turn must be reported as an error');
+    const finish = parsed.map((c) => c.choices?.[0]?.finish_reason).filter(Boolean);
+    assert.deepEqual(finish, ['network_error']);
   } finally {
     await shim.close();
     upstream.server.close();
@@ -1517,5 +1526,65 @@ test('shim: 流已开始但中途静默 —— 流内看门狗给出 error 帧 +
     await shim.close();
     upstream.closeAllConnections?.();
     upstream.close();
+  }
+});
+
+test('shim: 带工具调用的回合不会被标成 stop（否则 agent 停在工具前）', async () => {
+  const upstream = await startFakeUpstream(async () => ({
+    pieces: [
+      chunkFrame({
+        tool_calls: [
+          { index: 0, id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a"}' } },
+        ],
+      }) + '\n\n',
+      chunkFrame({}, 'stop') + '\n\n',
+    ],
+  }));
+  const shim = await startShim(`http://127.0.0.1:${upstream.port}/upstream`);
+  try {
+    const res = await fetch(shim.base, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${shim.secret}` },
+      body: JSON.stringify({ model: 'pro', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const frames = await collectSse(res);
+    const parsed = frames.filter((f) => f !== '[DONE]').map((f) => JSON.parse(f));
+    assert.ok(
+      parsed.some((c) => (c.choices?.[0]?.delta?.tool_calls ?? []).length > 0),
+      '工具调用分片必须到达下游',
+    );
+    const finish = parsed.map((c) => c.choices?.[0]?.finish_reason).filter(Boolean);
+    assert.deepEqual(finish, ['tool_calls'], '带工具调用的回合必须报 tool_calls');
+  } finally {
+    await shim.close();
+    upstream.server.close();
+  }
+});
+
+test('shim: 只思考不回答的回合报错，而不是静默 stop', async () => {
+  const upstream = await startFakeUpstream(async () => ({
+    pieces: [
+      chunkFrame({ reasoning_content: '想了很久，最后什么也没说……' }) + '\n\n',
+      chunkFrame({}, 'stop') + '\n\n',
+    ],
+  }));
+  const shim = await startShim(`http://127.0.0.1:${upstream.port}/upstream`);
+  try {
+    const res = await fetch(shim.base, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${shim.secret}` },
+      body: JSON.stringify({ model: 'pro', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const frames = await collectSse(res);
+    const parsed = frames.filter((f) => f !== '[DONE]').map((f) => JSON.parse(f));
+    assert.ok(
+      parsed.some((c) => c.error?.type === 'empty_answer'),
+      '空回合必须带可辨识的错误，否则下游把它当成正常收尾',
+    );
+    const finish = parsed.map((c) => c.choices?.[0]?.finish_reason).filter(Boolean);
+    assert.deepEqual(finish, ['network_error']);
+  } finally {
+    await shim.close();
+    upstream.server.close();
   }
 });

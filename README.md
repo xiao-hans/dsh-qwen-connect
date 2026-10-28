@@ -162,12 +162,31 @@ Copy-Item "$w\_backup-qwen-connect-20260911-141226\package.json" "$w\package.jso
 Copy-Item "$w\_backup-qwen-connect-20260911-141226\cordis.patch.yml" "$w\cordis.patch.yml" -Force
 ```
 
+## 流收尾语义（为什么回合不会「突然不动」）
+
+长时间任务里最容易出现的症状是：模型忽然没了输出、界面一直转、又没有任何报错。
+根因通常不在模型，而在代理把「异常结束」说成了「正常结束」。本插件的 shim 按下面五条收尾：
+
+| 情况 | shim 行为 |
+|---|---|
+| 已开流后上游静默（首帧前 90s / 首帧后 300s） | 写 `error` 帧 + `[DONE]`，并 abort 上游；下游按错误重试，不会挂在一个永远没有下文的连接上 |
+| 上游没给 finish 帧就断流 | 有产出 → `finish_reason: "length"`（截断如实上报）；无产出 → `error` 帧 + `network_error` |
+| 流里出现过 `tool_calls`，上游却标了 `stop` | 纠正为 `finish_reason: "tool_calls"`，否则下游的 agent 循环会停在工具调用之前 |
+| 整回合只有思考、正文与工具调用都没有 | `error` 帧（`empty_answer`）+ `network_error`，让下游重试（实测过 340s 思考、9.5 万字符思考链、0 正文） |
+| 客户端中途断开 | abort 上游请求，取消的回合立刻停止生成 |
+
+`FIRST_CONTENT_TIMEOUT_MS`（90 秒）此前只有声明和注释、没有代码引用；现在它是真实的
+首帧预算：上游「接了单没排上」的排队态会在 90 秒内明确失败，而不是拖满 300 秒。
+
+回归测试：`node --test test/unit/stream-robustness.test.mjs`。
+
 ## 已知限制
 
 1. **仅 Windows**：凭据解密走 Windows DPAPI。
-2. **工具调用 / 视觉输入未支持**：文本流式对话与多轮已打通；但
-   `tool_calls` 未做协议转换，图片输入会被 shim 丢弃（`toQwenWorkMessages()`
-   只保留 `type: 'text'` 块）。**不要依赖这两项能力。**
+2. **工具调用已透传，视觉输入仍不支持**：`tool_calls` 分片（含 `index`/`id`/
+   `function`）原样转成 OpenAI 形状，收尾时把上游常标的 `stop` 纠正为
+   `tool_calls`；图片输入仍会被 shim 丢弃（`toQwenWorkMessages()` 只保留
+   `type: 'text'` 块）。
 3. **DPAPI 依赖 PowerShell 兜底**：本机未装 `koffi`/`ffi-napi`，走 PowerShell
    子进程（每进程约几十毫秒）。
 4. **模型目录是静态的**：`/api/v2/model/list` 需要 WASM 签名（403），
