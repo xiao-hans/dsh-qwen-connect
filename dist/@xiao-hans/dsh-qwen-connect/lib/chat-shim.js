@@ -99,6 +99,14 @@ export function isRetryableStatus(status) {
  *
  * 该值只覆盖「拿到响应头之前」，不限制后续流式读取（那由 `getIdleTimeoutMs`
  * 的流内看门狗负责）。
+ *
+ * ⚠️ 实现约束（2026-10-28 事故）：**必须用可清除的 AbortController，不得用
+ * AbortSignal.timeout**。AbortSignal.timeout 一旦绑进 fetch 的 signal，undici
+ * 会把它维持到**整个响应生命周期结束（含 body 流）**，而不是拿到头就解除——
+ * 长思考请求（thinking 流 >180s）会在第 180 秒被掐死，抛
+ * "The operation was aborted due to timeout"，且下游（DSH/pi）重试后每次都
+ * 挂在同一秒。响应头到手后必须 clearTimeout，此后流只受 upstreamAbort
+ * （idle 看门狗 / 客户端断开）控制。
  */
 export const UPSTREAM_HEADER_TIMEOUT_MS = 180_000;
 
@@ -122,11 +130,21 @@ async function fetchUpstreamWithRetry(session, bodyJson, modelKey, log, opts = {
     // 每次尝试都重新签名：签名内含时间戳，重试时必须刷新，否则会被判过期。
     const signed = session.signInferRequest(bodyJson, { modelKey, modelSource: 'system' });
     let response;
+    // ⚠️ 用**可清除**的 AbortController 而非 AbortSignal.timeout（见常量文档）：
+    // 响应头到手立刻 clearTimeout，header 超时从此不再约束 body 流。
+    const headerAbort = new AbortController();
+    let headerTimer = null;
     try {
       // 响应头超时：上游不响应时明确失败，而不是让客户端无限等待。
-      const timeoutSignal = AbortSignal.timeout(headerTimeoutMs);
+      headerTimer = setTimeout(() => {
+        headerAbort.abort(
+          new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+        );
+      }, headerTimeoutMs);
       const signal =
-        opts.signal === undefined ? timeoutSignal : AbortSignal.any([opts.signal, timeoutSignal]);
+        opts.signal === undefined
+          ? headerAbort.signal
+          : AbortSignal.any([opts.signal, headerAbort.signal]);
       response = await fetch(signed.url, {
         method: 'POST',
         headers: signed.headers,
@@ -154,6 +172,10 @@ async function fetchUpstreamWithRetry(session, bodyJson, modelKey, log, opts = {
         continue;
       }
       throw error;
+    } finally {
+      // 无论成功/失败/抛错，header 计时器到此为止——成功路径上响应头已到手，
+      // 之后的 body 流只受 opts.signal（idle 看门狗 / 客户端断开）约束。
+      if (headerTimer !== null) clearTimeout(headerTimer);
     }
 
     if (response.ok || !isRetryableStatus(response.status)) return response;
