@@ -18,6 +18,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
+// 同 stream-robustness：header 超时注入也会写 trace，隔离掉。
+import './trace-sandbox.mjs';
+
 import { createChatShimHandler } from '../../lib/chat-shim.js';
 
 // ---------------------------------------------------------------------------

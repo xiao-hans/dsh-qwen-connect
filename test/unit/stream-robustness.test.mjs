@@ -9,6 +9,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 
+// 故障注入用例（500ms 看门狗）会写下伪数据：隔离到项目内临时目录，
+// 避免污染用户真正用来排障的共享日志。
+import './trace-sandbox.mjs';
+
 import {
   SseParser,
   parseQwenWorkFrame,
@@ -1519,7 +1523,7 @@ test('shim: 流已开始但中途静默 —— 流内看门狗给出 error 帧 +
     const frames = await collectSse(res);
     assert.equal(frames.at(-1), '[DONE]', '看门狗必须收尾，否则下游会一直等');
     assert.ok(
-      frames.some((f) => f.includes('upstream produced no data')),
+      frames.some((f) => f.includes('upstream idle timeout: no data')),
       '必须给出可辨识的超时原因，而不是静默结束',
     );
   } finally {
