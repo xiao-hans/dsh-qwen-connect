@@ -23,6 +23,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 
 import { loopbackRequest } from './loopback.js';
 import { safeMessage } from './web-status.js';
@@ -37,7 +38,7 @@ import { buildInferBody, createSignerSession } from './signer-session.js';
 import { resolveGatewayEndpoint, relaxTlsForVpc } from './endpoint.js';
 import { FALLBACK_QWENWORK_MODELS, normalizeModelKey } from './models.js';
 import { recordSample } from './perf.js';
-import { trace } from './trace.js';
+import { trace as appendTrace } from './trace.js';
 
 /** shim 对外暴露的 OpenAI 兼容路径。 */
 export const CHAT_COMPLETIONS_PATH = '/v1/chat/completions';
@@ -557,6 +558,8 @@ export function createChatShimHandler(deps) {
 
   return async function handleChatShim(req, res) {
     const reqT0 = Date.now();
+    const requestId = crypto.randomUUID();
+    const trace = (event, data = {}) => appendTrace(event, { requestId, ...data });
     trace('request-in', { method: req.method, url: req.url });
     if (req.method !== 'POST') {
       trace('reject', { reason: 'method', status: 405 });
@@ -626,6 +629,8 @@ export function createChatShimHandler(deps) {
     // 使**所有**请求都直接 502。
     const upstreamAbort = new AbortController();
     let upstream;
+    /** @type {Record<string, string>} */
+    const upstreamRequestIds = {};
     try {
       // tools 必须一并透传：否则模型收不到工具 schema，会编造自由文本格式。
       // 1.2.0 的 model_config 需要 is_vl / is_reasoning（规格 §3.6），取值来自
@@ -648,7 +653,18 @@ export function createChatShimHandler(deps) {
         signal: upstreamAbort.signal,
         ...(headerTimeoutMs === undefined ? {} : { headerTimeoutMs }),
       });
-      trace('upstream-headers', { ms: Date.now() - reqT0, status: upstream.status, model: modelKey });
+      for (const name of ['x-request-id', 'x-acs-request-id', 'request-id', 'x-trace-id', 'x-correlation-id', 'traceparent']) {
+        const value = upstream.headers.get(name);
+        if (value !== null) upstreamRequestIds[name] = value;
+      }
+      trace('upstream-headers', {
+        ms: Date.now() - reqT0,
+        status: upstream.status,
+        model: modelKey,
+        upstreamSessionId: sessionId,
+        upstreamRequestIds,
+        contentType: upstream.headers.get('content-type'),
+      });
     } catch (error) {
       trace('upstream-fail', { ms: Date.now() - reqT0, error: safeMessage(error) });
       log.warn?.('dsh-qwen-connect: upstream request failed', safeMessage(error));
@@ -673,7 +689,7 @@ export function createChatShimHandler(deps) {
       'X-Accel-Buffering': 'no',
     });
 
-    const chunkId = `chatcmpl-${Date.now().toString(36)}`;
+    const chunkId = `chatcmpl-${requestId}`;
     const created = Math.floor(Date.now() / 1000);
     const parser = new SseParser();
     let finished = false;
@@ -692,6 +708,28 @@ export function createChatShimHandler(deps) {
     let thinkingChars = 0;
     /** 本回合是否已下发工具调用分片（有它就算有产出）。 */
     let toolCallsEmitted = false;
+    let lastChunkAt = null;
+    let upstreamChunks = 0;
+    let upstreamBytes = 0;
+    const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+    const streamDiagnostics = () => ({
+      responseId: chunkId,
+      upstreamSessionId: sessionId,
+      upstreamRequestIds,
+      lastChunkAt: lastChunkAt === null ? null : new Date(lastChunkAt).toISOString(),
+      idleMs: Date.now() - (lastChunkAt ?? startedAt),
+      upstreamChunks,
+      upstreamBytes,
+      outputChars,
+      thinkingChars,
+      toolCallsEmitted,
+      usageSeen: usage !== null,
+      eventLoopDelayMs: eventLoopDelay.max === 0 ? null : {
+        resolutionMs: 20,
+        max: eventLoopDelay.max / 1e6,
+        p99: eventLoopDelay.percentile(99) / 1e6,
+      },
+    });
     // ---- 「200 之后的静默」放弃计时器 ----
     // 上游拿到 200 后若在 FIRST_CONTENT_TIMEOUT_MS 内**任何帧都没发**
     // （reasoning 或 content 都算帧），就视为排队失败，主动放弃并报错。
@@ -819,18 +857,25 @@ export function createChatShimHandler(deps) {
      */
     const armIdle = (deadlineMs = idleTimeoutMs) => {
       clearTimeout(idleTimer.current);
+      const dueAt = performance.now() + deadlineMs;
       idleTimer.current = setTimeout(() => {
         // ⚠️ 关键：必须**先给客户端一个明确结果**，再收摊。
         // 只设 clientGone 会让后续所有 write 被跳过，客户端一个字节都收不到
         // → 界面永久转圈（表现为"卡住"，比报错更难排查）。
         idleFired = true;
-        trace('idle-watchdog-fired', { ms: Date.now() - reqT0, deadlineMs });
+        trace('idle-watchdog-fired', {
+          ms: Date.now() - reqT0,
+          deadlineMs,
+          watchdogDelayMs: Math.max(0, performance.now() - dueAt),
+          ...streamDiagnostics(),
+        });
         if (!res.writableEnded) {
           try {
             res.write(
               `data: ${JSON.stringify({
                 error: {
-                  message: `upstream produced no data for ${deadlineMs}ms`,
+                  // DSH pi-ai 按错误消息识别 TIMEOUT，由宿主策略控制重试。
+                  message: `upstream idle timeout: no data for ${deadlineMs}ms`,
                   type: 'api_error',
                 },
               })}\n\n`,
@@ -856,12 +901,19 @@ export function createChatShimHandler(deps) {
     };
 
     try {
+      eventLoopDelay.enable();
       // 首帧预算更紧：排队态的 200 会先到、随后长时间零字节。
       armIdle(FIRST_CONTENT_TIMEOUT_MS);
       const decoder = new TextDecoder('utf-8');
       for await (const chunk of upstream.body) {
         if (clientGone) break;
+        lastChunkAt = Date.now();
+        upstreamChunks += 1;
+        upstreamBytes += chunk.byteLength;
         armIdle();
+        if (upstreamChunks === 1) {
+          trace('first-upstream-chunk', { ms: lastChunkAt - reqT0, bytes: chunk.byteLength });
+        }
         const payloads = parser.push(decoder.decode(chunk, { stream: true }));
         let keepGoing = true;
         for (const payload of payloads) {
@@ -967,13 +1019,15 @@ export function createChatShimHandler(deps) {
       }
     } finally {
       clearTimeout(idleTimer.current);
+      eventLoopDelay.disable();
       trace('stream-end', {
         ms: Date.now() - reqT0,
         clientGone,
         errored,
         finished,
         idleFired,
-        outputChars,
+        abortReason: upstreamAbort.signal.aborted ? safeMessage(upstreamAbort.signal.reason) : null,
+        ...streamDiagnostics(),
       });
       // 性能采样：只在「有正文且未出错」时记录——失败请求与纯思考无正文的
       // 请求会污染速率统计（分母极小或为 0）。recordSample 内部还会再校验。

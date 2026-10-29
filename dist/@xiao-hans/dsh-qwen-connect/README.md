@@ -164,21 +164,76 @@ Copy-Item "$w\_backup-qwen-connect-20260911-141226\cordis.patch.yml" "$w\cordis.
 
 ## 流收尾语义（为什么回合不会「突然不动」）
 
-长时间任务里最容易出现的症状是：模型忽然没了输出、界面一直转、又没有任何报错。
-根因通常不在模型，而在代理把「异常结束」说成了「正常结束」。本插件的 shim 按下面五条收尾：
+流式推理需要区分正常收尾、截断、超时和客户端取消。shim 按以下情况给下游明确结果：
 
 | 情况 | shim 行为 |
 |---|---|
-| 已开流后上游静默（首帧前 90s / 首帧后 300s） | 写 `error` 帧 + `[DONE]`，并 abort 上游；下游按错误重试，不会挂在一个永远没有下文的连接上 |
+| 已开流后上游静默（首帧前 90s / 首帧后 300s） | 写带 `upstream idle timeout` 标记的 `error` 帧 + `[DONE]`，并 abort 上游；DSH pi-ai 将其归为 `TIMEOUT` |
 | 上游没给 finish 帧就断流 | 有产出 → `finish_reason: "length"`（截断如实上报）；无产出 → `error` 帧 + `network_error` |
 | 流里出现过 `tool_calls`，上游却标了 `stop` | 纠正为 `finish_reason: "tool_calls"`，否则下游的 agent 循环会停在工具调用之前 |
 | 整回合只有思考、正文与工具调用都没有 | `error` 帧（`empty_answer`）+ `network_error`，让下游重试（实测过 340s 思考、9.5 万字符思考链、0 正文） |
 | 客户端中途断开 | abort 上游请求，取消的回合立刻停止生成 |
 
-`FIRST_CONTENT_TIMEOUT_MS`（90 秒）此前只有声明和注释、没有代码引用；现在它是真实的
-首帧预算：上游「接了单没排上」的排队态会在 90 秒内明确失败，而不是拖满 300 秒。
+空闲超时错误示例为 `upstream idle timeout: no data for 300000ms`。`timeout` 标记让
+DSH 的 pi-ai adapter 产出 `TIMEOUT`，而不是通用的 `PI_AI_ERROR`。启用宿主
+`llm-retry` 时，由 provider 的既有重试策略控制次数、退避和取消；shim 不在已经开始的流内重放请求。
 
-回归测试：`node --test test/unit/stream-robustness.test.mjs`。
+`FIRST_CONTENT_TIMEOUT_MS` 保持 90 秒，首个原始数据块之后的空闲预算保持 300 秒。
+任意原始上游数据块（含心跳）都会重置空闲计时，正文、思考和 token 统计各自处理。
+
+回归测试：`node --test test/unit/stream-robustness.test.mjs test/unit/chat-shim-timeout-diagnostics.test.mjs`。
+完整 `npm test` 需要 DSH 宿主提供的 peer 依赖；普通 Node 环境的依赖缺失应与插件行为失败分开判断。
+
+### 请求级流诊断
+
+日志位于 `os.tmpdir()/dsh-qwen-connect-trace.log`，上限 2 MiB（超过即截断重开）。
+Pi 侧插件（pi-provider-qwenwork）固定写自己的 `pi-qwenwork-trace.log`：两边共用
+一个文件时，本包宿主的活跃流量会在几十分钟内把 Pi 侧的事故记录轮转出上限。
+单测必须用 `QWEN_CONNECT_TRACE_PATH` 把写入重定向到项目内临时目录
+（`test/unit/trace-sandbox.mjs` 已统一处理），否则故障注入的伪数据会被误读成线上事故。
+同一推理链的 Pi 版与 DSH 版使用一致的字段语义，以 `source` 和 `pid` 区分来源。
+
+| 字段 | 含义 |
+|---|---|
+| `source` / `pid` | 本插件为 `dsh-qwen-connect`，并记录当前进程号 |
+| `requestId` / `responseId` | 每个本地请求独立的 UUID；对应 SSE 的 `chatcmpl-<UUID>`，用于关联该请求的日志 |
+| `upstreamSessionId` / `upstreamRequestIds` | 上游对话 ID 与白名单响应关联头；上游未返回关联头时保留空对象 |
+| `lastChunkAt` / `idleMs` | 本地最后读到原始数据块的时间与距该时刻的间隔；尚无数据块时前者为 `null` |
+| `upstreamChunks` / `upstreamBytes` | 原始数据块数与字节数，与解析出的正文长度分开统计 |
+| `outputChars` / `thinkingChars` / `toolCallsEmitted` / `usageSeen` | 正文长度、思考长度、是否转发工具调用、是否收到有效 usage |
+| `watchdogDelayMs` / `eventLoopDelayMs` | 看门狗回调相对单调时钟截止点的延迟；流读取期间事件循环延迟的最大值、p99，单位为毫秒、采样分辨率 20 ms，尚无采样时为 `null` |
+
+超时与流结束事件包含上述流摘要；首个原始数据块另记一次事件，不逐块刷日志。
+这些记录不包含原始提示词、思考正文、凭据或全部响应头。`lastChunkAt` 是本地读取时间，
+不能单独证明远端模型何时停止生成；需结合上游关联 ID、事件循环延迟与链路证据定位。
+
+## 自动续跑与用户停止的优先级
+
+模型有时会「宣告下一步却直接 stop」，`lib/stall-guard.js` 判定该形态后，插件在回合
+收尾、agent 进入 idle 后通过微任务补一条 notice 让本轮继续（上限 `MAX_AUTO_CONTINUES = 2`，
+用户本人发言后重新计数）。
+
+> **为什么不能在 `agent/status(idle)` 回调栈内同步调用 `agent.followup()`**：
+> Cordis 按插件注册顺序同步遍历 `agent/status` 监听器，本插件早于
+> `dsh-api-session-controller` 的状态桥接监听器执行。若在 `status='idle'` 回调内直接同步调用
+> `agent.followup()`，其内部 `wakeDriver() -> setPhase('running')` 会在外层 `idle` 广播走完前
+> 先重入发出 `api-session/status(true)`，随后外层循环继续才发出 `api-session/status(false)`。
+> 前端最终定格在 `running=false`，导致整个自动续跑回合里输入框一直显示「发送」而非
+> 「停止生成」，用户压根点不到停止按钮。改为 `queueMicrotask` 推迟一拍后，外层 `false`
+> 先广播完，微任务再复核空闲/打断/队列状态并触发 `followup()`，前端正序收到 `[false, true]`。
+
+这条机制同时保证永远排在用户的停止之后：
+
+| 情况 | 插件行为 |
+|---|---|
+| `agent/status(idle)` 触发续跑 | 排入微任务脱离同步广播栈，避免 `api-session/status` 顺序反转成 `false`（界面卡在「发送」按钮） |
+| 回合以 `aborted` / `error` / `interrupted` 收尾 | 撤销待续跑意图并置打断标记，不再自动续跑 |
+| 被打断之后由后台任务/通知类消息开的新回合（`source.kind !== 'user'`） | 仍不续跑——只有用户本人发言才解除打断标记 |
+| agent 空闲时收件箱已有待处理输入（`agent.inbox.hasPending`） | 跳过续跑，让用户的输入自己开下一轮，不抢在其前面 |
+| `agent.inbox` 投影未激活导致读取抛错 | 按未知处理，维持既有续跑，观测失败不得吞掉功能 |
+
+回归测试：`node --import ./tmp/with-dsh-sdk.mjs --test test/unit/stall-guard-stop.test.mjs`。
+判定口径本身（哪些正文算半途停止）仍由 `test/unit/stall-guard.test.mjs` 锁定。
 
 ## 已知限制
 

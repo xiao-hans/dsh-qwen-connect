@@ -435,8 +435,21 @@ export function apply(ctx, config) {
 /**
  * 模型宣告下一步后直接 stop（见 ./stall-guard.js）：回合完成后补一条续跑提示。
  *
- * ⚠️ 必须等 agent 进入 idle 再 followup（与内置 goal-round-driver 同一时机）：
- * `turn/end` 发出时回合尚在收尾，此时排队的消息可能错过本轮的取件检查。
+ * ⚠️ 必须等 agent 进入 idle 再排微任务调用 followup（与内置 goal-round-driver 同一时机）：
+ * 1. `turn/end` 发出时回合尚在收尾，此时排队的消息可能错过本轮的取件检查。
+ * 2. 绝不能在 `agent/status(idle)` 的同步回调栈内直接调 `agent.followup()`！
+ *    因为 Cordis 的 `ctx.on('agent/status')` 按插件注册顺序同步遍历，本插件早于
+ *    `dsh-api-session-controller` 的状态桥接监听器执行：若同步重入调用 `followup()`，
+ *    内部 `wakeDriver() -> setPhase(running)` 会在外层 `status=idle` 广播完成前先发出
+ *    `api-session/status(true)`，随后外层继续走完才发出 `api-session/status(false)`。
+ *    前端最终收到 `running=false`，导致整个自动续跑回合里输入框一直显示「发送」而非
+ *    「停止生成」，用户根本点不到停止按钮。排入微任务后，同步 `status=idle` 广播先走完，
+ *    微任务里再复核 `status === 'idle'`、打断状态与收件箱队列，正序触发 `running=true`。
+ *
+ * ⚠️ 用户的停止/取消优先于续跑：回合以非 completed 收尾（aborted/error/
+ * interrupted）说明这轮被打断或出错，此时不得再自动续跑，直到用户真的
+ * 发下一条消息（`source.kind === 'user'`）才重新武装。自动续跑也从不
+ * 抢在已排队的用户输入之前——那条输入本来就要开下一轮。
  */
 function installStallGuard(ctx) {
   /** @type {WeakMap<object, any>} 会话 → 本回合最后一条 assistant 消息 */
@@ -445,39 +458,91 @@ function installStallGuard(ctx) {
   const autoContinues = new WeakMap();
   /** @type {WeakSet<object>} 等 agent 空闲后续跑的会话 */
   const pending = new WeakSet();
+  /** @type {WeakSet<object>} 已排入微任务等待触发 followup 的会话（防重入去重） */
+  const scheduled = new WeakSet();
+  /** @type {WeakSet<object>} 用户已打断过、在等其下一条输入的会话 */
+  const stopped = new WeakSet();
 
   ctx.on('session/event', (session, event) => {
     switch (event.type) {
       case 'user/message':
-        if (event.data.source?.kind === 'user') autoContinues.delete(session);
+        if (event.data.source?.kind === 'user') {
+          autoContinues.delete(session);
+          stopped.delete(session);
+        }
         return;
       case 'assistant/message':
         lastReply.set(session, event.data.message);
         return;
       case 'turn/end':
-        if (event.data.reason.kind === 'completed' && shouldContinue(session)) pending.add(session);
+        if (event.data.reason.kind !== 'completed') {
+          pending.delete(session);
+          stopped.add(session);
+          ctx.logger?.info?.(
+            `dsh-qwen-connect: auto-continue disarmed (turn ended ${event.data.reason.kind})`,
+          );
+          return;
+        }
+        if (shouldContinue(session)) pending.add(session);
         return;
       default:
     }
   });
 
   ctx.on('agent/status', ({ agent, status }) => {
-    if (status !== 'idle' || !pending.has(agent.session)) return;
-    pending.delete(agent.session);
-    autoContinues.set(agent.session, (autoContinues.get(agent.session) ?? 0) + 1);
-    try {
-      agent.followup(
-        createUserMessage({
-          content: [{ type: 'text', text: CONTINUE_PROMPT }],
-          source: { kind: 'qwenwork-auto-continue', form: 'notice', summary: '模型宣告下一步后停止，已自动续跑' },
-        }),
-      );
-    } catch (error) {
-      ctx.logger?.warn?.('dsh-qwen-connect: auto-continue could not be queued', error);
-    }
+    if (status !== 'idle' || !pending.has(agent.session) || scheduled.has(agent.session)) return;
+    scheduled.add(agent.session);
+    queueMicrotask(() => {
+      scheduled.delete(agent.session);
+      if (!pending.has(agent.session)) return;
+      if (agent.status !== undefined && agent.status !== 'idle') return;
+      if (stopped.has(agent.session)) {
+        pending.delete(agent.session);
+        return;
+      }
+      if (hasQueuedWork(agent)) {
+        pending.delete(agent.session);
+        ctx.logger?.info?.('dsh-qwen-connect: auto-continue skipped (user input already queued)');
+        return;
+      }
+      pending.delete(agent.session);
+      autoContinues.set(agent.session, (autoContinues.get(agent.session) ?? 0) + 1);
+      const launch = () =>
+        agent.followup(
+          createUserMessage({
+            content: [{ type: 'text', text: CONTINUE_PROMPT }],
+            source: { kind: 'qwenwork-auto-continue', form: 'notice', summary: '模型宣告下一步后停止，已自动续跑' },
+          }),
+        );
+      try {
+        if (typeof ctx.agents?.withoutInitiator === 'function') {
+          ctx.agents.withoutInitiator(launch);
+        } else {
+          launch();
+        }
+      } catch (error) {
+        ctx.logger?.warn?.('dsh-qwen-connect: auto-continue could not be queued', error);
+      }
+    });
   });
 
+  /**
+   * 收件箱里是否已有待处理输入。投影未激活时 dsh-agent-loop 的 getter 会抛，
+   * 那按「未知」处理（维持既有行为去续跑），不能让一次观测失败吞掉续跑本身。
+   * @param {any} agent
+   */
+  function hasQueuedWork(agent) {
+    try {
+      return agent.inbox?.hasPending === true;
+    } catch {
+      return false;
+    }
+  }
+
   function shouldContinue(session) {
+    // 用户停止优先：打断过就不得再自动续跑，哪怕后面的回合是由后台
+    // 任务/通知类消息开的（非 source.kind === 'user'）。
+    if (stopped.has(session)) return false;
     const reply = lastReply.get(session);
     if (reply?.source?.provider !== QWENWORK_PROVIDER) return false;
     if ((autoContinues.get(session) ?? 0) >= MAX_AUTO_CONTINUES) return false;
@@ -494,5 +559,6 @@ export {
   FALLBACK_QWENWORK_MODELS,
   QWENWORK_PROVIDER,
   createQwenWorkAdapter,
+  installStallGuard,
   SHIM_UNAVAILABLE_BASE_URL,
 };
