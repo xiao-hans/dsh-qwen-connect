@@ -209,31 +209,29 @@ Pi 侧插件（pi-provider-qwenwork）固定写自己的 `pi-qwenwork-trace.log`
 
 ## 自动续跑与用户停止的优先级
 
-模型有时会「宣告下一步却直接 stop」，`lib/stall-guard.js` 判定该形态后，插件在回合
-收尾、agent 进入 idle 后通过微任务补一条 notice 让本轮继续（上限 `MAX_AUTO_CONTINUES = 2`，
-用户本人发言后重新计数）。
+模型有时会「宣告下一步却直接 stop」，`lib/stall-detector.js` 的 `detectStall()` 判定该形态后，
+`lib/stall-guard.js` 在 `agent/turn-stopping` 钩子内通过 `agent.steer(...)` 原位补一条 notice
+让当前轮继续（上限 `MAX_AUTO_CONTINUES = 2`，用户本人发言后重新计数）。
 
-> **为什么不能在 `agent/status(idle)` 回调栈内同步调用 `agent.followup()`**：
-> Cordis 按插件注册顺序同步遍历 `agent/status` 监听器，本插件早于
-> `dsh-api-session-controller` 的状态桥接监听器执行。若在 `status='idle'` 回调内直接同步调用
-> `agent.followup()`，其内部 `wakeDriver() -> setPhase('running')` 会在外层 `idle` 广播走完前
-> 先重入发出 `api-session/status(true)`，随后外层循环继续才发出 `api-session/status(false)`。
-> 前端最终定格在 `running=false`，导致整个自动续跑回合里输入框一直显示「发送」而非
-> 「停止生成」，用户压根点不到停止按钮。改为 `queueMicrotask` 推迟一拍后，外层 `false`
-> 先广播完，微任务再复核空闲/打断/队列状态并触发 `followup()`，前端正序收到 `[false, true]`。
+> **为什么挂在 `agent/turn-stopping` 用 `agent.steer()`，而不是在 `agent/status(idle)` 里调 `followup()`**：
+> `dsh-agent-loop` 在「本轮即将收尾、模型不再欠回复」时串行触发 `agent/turn-stopping`；
+> 监听器在此处调用 `agent.steer()` 会把消息压入 `nextStep` 队列，状态机直接在当前轮内继续下一步，
+> **不会切入 `idle`，前端 `running` 始终保持 `true`（「停止生成」按钮常驻，不会闪烁或退化成「发送」按钮）**，
+> 也彻底避开了 `agent/status(idle)` 同步广播栈内重入导致 `api-session/status` 翻转成 `false` 的问题。
 
 这条机制同时保证永远排在用户的停止之后：
 
 | 情况 | 插件行为 |
 |---|---|
-| `agent/status(idle)` 触发续跑 | 排入微任务脱离同步广播栈，避免 `api-session/status` 顺序反转成 `false`（界面卡在「发送」按钮） |
-| 回合以 `aborted` / `error` / `interrupted` 收尾 | 撤销待续跑意图并置打断标记，不再自动续跑 |
-| 被打断之后由后台任务/通知类消息开的新回合（`source.kind !== 'user'`） | 仍不续跑——只有用户本人发言才解除打断标记 |
-| agent 空闲时收件箱已有待处理输入（`agent.inbox.hasPending`） | 跳过续跑，让用户的输入自己开下一轮，不抢在其前面 |
+| `agent/turn-stopping` 触发原位续跑 | 调用 `agent.steer()` 在本轮内继续，不切 `idle`，「停止生成」按钮常驻 |
+| `signal.aborted` 为真，或回合以 `aborted` / `error` / `interrupted` 收尾 | 立即放弃续跑并置会话打断锁定，不再自动续跑 |
+| 被打断之后由后台任务/通知类消息开的新回合（`source.kind !== 'user'`） | 仍不续跑——只有用户本人发言（`source.kind === 'user'`）才解除打断标记并重置预算 |
+| 收件箱已有待处理输入（`agent.inbox.hasPending`） | 跳过续跑，让用户的输入优先处理，不抢在其前面 |
+| 确认/复述长期规则约定（「以后遇到…我会先…」） | `detectStall` 返回 `verdict: 'standing-rule'` 否决，不误触发续跑 |
 | `agent.inbox` 投影未激活导致读取抛错 | 按未知处理，维持既有续跑，观测失败不得吞掉功能 |
 
 回归测试：`node --import ./tmp/with-dsh-sdk.mjs --test test/unit/stall-guard-stop.test.mjs`。
-判定口径本身（哪些正文算半途停止）仍由 `test/unit/stall-guard.test.mjs` 锁定。
+判定口径本身（哪些正文算半途停止）由 `test/unit/stall-guard.test.mjs` 锁定。
 
 ## 已知限制
 
