@@ -561,21 +561,50 @@ export function createChatShimHandler(deps) {
     const requestId = crypto.randomUUID();
     const trace = (event, data = {}) => appendTrace(event, { requestId, ...data });
     trace('request-in', { method: req.method, url: req.url });
+    // ---- 观测盲区修补 -------------------------------------------------
+    // 曾有 33 条请求只留下 `request-in`，之后一行都没有：它们走的都是
+    // 「向客户端写完错误就 return」的提前返回，以及**在下方 res.on('close')
+    // 注册之前**就断开的连接。两种情况都不落日志，事后无法归因。
+    // `stage` 记录请求走到的最后一步；`settled` 表示已有专门的收尾行
+    // （reject / upstream-fail / upstream-rejected / stream-end）。未 settled 就
+    // 结束 ⇒ 补一行 request-end，说明它走到了哪里、是客户端先挂断还是
+    // 处理器抛异常后由外层回了 500。
+    let stage = 'request-in';
+    let settled = false;
+    /** 提前返回统一出口：先留痕，再回错误。 */
+    const reject = (reason, status, message, type) => {
+      stage = `reject:${reason}`;
+      // 客户端已挂时 close 监听可能先记了一行 request-end：同一请求只允许
+      // 一条终止记录，否则下游统计会重复计数。
+      if (!settled) {
+        settled = true;
+        trace('reject', { reason, status, ms: Date.now() - reqT0, message });
+      }
+      jsonError(res, status, message, type);
+    };
+    res.on('close', () => {
+      if (settled) return;
+      trace('request-end', {
+        stage,
+        // ended=false：客户端在完成前断开；ended=true：我们回了响应却没人记账
+        //（处理器抛异常，由 startChatShim 的 catch 回了 500）。
+        ended: res.writableEnded === true,
+        ms: Date.now() - reqT0,
+      });
+      settled = true;
+    });
     if (req.method !== 'POST') {
-      trace('reject', { reason: 'method', status: 405 });
-      jsonError(res, 405, 'method not allowed', 'invalid_request_error');
+      reject('method', 405, 'method not allowed', 'invalid_request_error');
       return;
     }
     if (!loopbackRequest(req)) {
-      trace('reject', { reason: 'loopback', status: 403 });
-      jsonError(res, 403, 'request-not-trusted', 'permission_error');
+      reject('loopback', 403, 'request-not-trusted', 'permission_error');
       return;
     }
     // 进程级鉴别：环回校验挡住外部主机，这里挡住本机其他进程。
     // 无密钥 / 错误密钥一律 401——不得在未鉴别时触碰任何业务逻辑或上游。
     if (!secretMatches(extractBearer(req), sharedSecret)) {
-      trace('reject', { reason: 'auth', status: 401 });
-      jsonError(res, 401, 'unauthorized', 'authentication_error');
+      reject('auth', 401, 'unauthorized', 'authentication_error');
       return;
     }
 
@@ -583,28 +612,32 @@ export function createChatShimHandler(deps) {
     try {
       raw = await readBody(req);
     } catch (error) {
-      jsonError(res, 413, safeMessage(error), 'invalid_request_error');
+      // 超上限与「客户端中途挂断」都从这里出来，必须分开记。
+      const oversize = /too large/i.test(safeMessage(error));
+      reject(oversize ? 'body-too-large' : 'body-read-failed', 413, safeMessage(error), 'invalid_request_error');
       return;
     }
+    stage = 'body-read';
 
     let body;
     try {
       body = JSON.parse(raw === '' ? '{}' : raw);
     } catch {
-      jsonError(res, 400, 'request body is not valid JSON', 'invalid_request_error');
+      reject('invalid-json', 400, 'request body is not valid JSON', 'invalid_request_error');
       return;
     }
+    stage = 'body-parsed';
 
     const messages = toQwenWorkMessages(body);
     if (messages.length === 0) {
-      jsonError(res, 400, 'messages is required', 'invalid_request_error');
+      reject('no-messages', 400, 'messages is required', 'invalid_request_error');
       return;
     }
     // 必须至少有一条 user 消息：上游以「最后一条 user 消息」作为 chat_context.text，
     // 只有 system / 只有 assistant 时该字段为空，上游会拿空输入作答（表现为答非所问）。
     // 与其让下游收到一段莫名其妙的内容，不如立刻给出明确的 400。
     if (!messages.some((m) => m.role === 'user')) {
-      jsonError(res, 400, 'messages must contain at least one user message', 'invalid_request_error');
+      reject('no-user-message', 400, 'messages must contain at least one user message', 'invalid_request_error');
       return;
     }
 
@@ -616,9 +649,10 @@ export function createChatShimHandler(deps) {
       session = await getSession();
     } catch (error) {
       log.warn?.('dsh-qwen-connect: chat shim could not build signer session', safeMessage(error));
-      jsonError(res, 503, safeMessage(error), 'authentication_error');
+      reject('signer-session', 503, safeMessage(error), 'authentication_error');
       return;
     }
+    stage = 'session-ready';
 
     // ---- 向上游发起签名请求 ------------------------------------------
     // 重试策略借鉴 Buddy2api 的 RETRYABLE_STATUS：仅对可重试状态码（限流/网关瞬时故障）
@@ -649,6 +683,7 @@ export function createChatShimHandler(deps) {
         // 此处保留仅为「只增不减」既有行为，删除它不属本任务范围。
         imageUrls: collectImageUrls(body),
       });
+      stage = 'upstream-fetch';
       upstream = await fetchUpstreamWithRetry(session, bodyJson, modelKey, log, {
         signal: upstreamAbort.signal,
         ...(headerTimeoutMs === undefined ? {} : { headerTimeoutMs }),
@@ -666,14 +701,17 @@ export function createChatShimHandler(deps) {
         contentType: upstream.headers.get('content-type'),
       });
     } catch (error) {
+      settled = true;
       trace('upstream-fail', { ms: Date.now() - reqT0, error: safeMessage(error) });
       log.warn?.('dsh-qwen-connect: upstream request failed', safeMessage(error));
       jsonError(res, 502, safeMessage(error), 'api_error');
       return;
     }
+    stage = 'upstream-headers';
 
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => '');
+      settled = true;
       trace('upstream-rejected', { ms: Date.now() - reqT0, status: upstream.status });
       log.warn?.('dsh-qwen-connect: upstream rejected', upstream.status);
       jsonError(res, upstream.status, safeMessage(text) || 'upstream error', 'api_error');
@@ -688,6 +726,10 @@ export function createChatShimHandler(deps) {
       // 明确禁止缓冲，保证真流式
       'X-Accel-Buffering': 'no',
     });
+
+    // 自此时刻起，收尾由下面的 stream-end / close 监听器负责，
+    // 顶部的 client-abort 观测器不再重复记账。
+    settled = true;
 
     const chunkId = `chatcmpl-${requestId}`;
     const created = Math.floor(Date.now() / 1000);
@@ -1056,18 +1098,32 @@ export function createChatShimHandler(deps) {
 function readBody(req, limit = 8 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let settled = false;
     const parts = [];
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      fn(arg);
+    };
     req.on('data', (chunk) => {
+      if (settled) return;
       size += chunk.length;
       if (size > limit) {
-        reject(new Error('request body too large'));
-        req.destroy();
+        // 不用 req.destroy()：它连 socket 一起拆，413 根本发不出去，调用方
+        // 只能拿到一个无信息的连接错误（旧行为）。这里只释已缓存的体，
+        // 响应写完后 Node 会自动断开未读完的请求。
+        parts.length = 0;
+        finish(reject, new Error('request body too large'));
         return;
       }
       parts.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => finish(resolve, Buffer.concat(parts).toString('utf8')));
+    req.on('error', (error) => finish(reject, error));
+    // 客户端写完一半就挂断：既不 end 也不 error。旧版本这里悬挂到进程结束，
+    // 每次只留下一个 `request-in`（就是 33 条孤儿记录里那类），
+    // 现在明确报错，让处理器能记下终止原因并释放 await。
+    req.on('close', () => finish(reject, new Error('request body was not delivered (client closed)')));
   });
 }
 

@@ -207,6 +207,25 @@ Pi 侧插件（pi-provider-qwenwork）固定写自己的 `pi-qwenwork-trace.log`
 这些记录不包含原始提示词、思考正文、凭据或全部响应头。`lastChunkAt` 是本地读取时间，
 不能单独证明远端模型何时停止生成；需结合上游关联 ID、事件循环延迟与链路证据定位。
 
+### 每个请求都必须留下一条终止记录
+
+排障时踩过的坑：2026-10-30 一次 502 风暴里，33 条请求在日志中只有 `request-in`，
+之后一行都没有，于是无法判断它们是我们提前返回、客户端先挂断，还是处理器抛异常。
+三类原因都存在：若干提前返回分支只回错误不写日志；`res.on('close')` 过去要到 SSE
+阶段才注册；`readBody()` 在客户端写完半截就断开时既不 `end` 也不 `error`，直接悬挂。
+
+现在每个请求恰好一条终止记录：
+
+| 终止事件 | 含义 |
+|---|---|
+| `reject` + `reason` | 提前返回：`method` / `loopback` / `auth` / `body-too-large` / `body-read-failed` / `invalid-json` / `no-messages` / `no-user-message` / `signer-session` |
+| `upstream-fail` / `upstream-rejected` | 上游发起失败或被拒（原有行为） |
+| `stream-end` | 已进入流式阶段（原有行为） |
+| `request-end` + `stage` | 上述之外就结束了：`ended:false` 表示客户端在完成前断开，`ended:true` 表示处理器抛异常后由外层回了 500 |
+
+回归测试：`node --test test/unit/chat-shim-request-observability.test.mjs`（含「只写半截
+JSON 就拆连接」的真实 socket 用例，验证它不再悬挂且一定留下可读的终止记录）。
+
 ## 自动续跑与用户停止的优先级
 
 模型有时会「宣告下一步却直接 stop」，`lib/stall-detector.js` 的 `detectStall()` 判定该形态后，
