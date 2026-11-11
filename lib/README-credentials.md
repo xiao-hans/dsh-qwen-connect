@@ -123,7 +123,7 @@ getValidToken: 返回 555 字符 token ✓
 
 ## 五、安全约束落实
 
-1. **绝不落盘明文**：回写走 `encryptV10`，已验证文件内不含 token 明文（`v10` 前缀 + AES-GCM）。
+1. **加密凭据不落盘明文**：DPAPI 路径的回写走 `encryptV10`，已验证文件内不含 token 明文（`v10` 前缀 + AES-GCM）。非 Windows 的明文 JSON（`source === 'file'`）是用户自行放置的文件，刷新时按原文件写回，权限 `0600`。
 2. **绝不写日志**：`describeCredentials()` 只输出长度/布尔/脱敏 ID（`1c0ec6c9...`）；
    所有错误信息不含 token；测试 `describeCredentials 不泄露 token 明文` 与
    `错误对象不含 token 明文` 强制保障。
@@ -134,7 +134,7 @@ getValidToken: 返回 555 字符 token ✓
 
 ## 六、已知限制
 
-1. **仅支持 Windows**：DPAPI 是 Windows 专有；非 win32 平台抛 `UNSUPPORTED_PLATFORM`。
+1. **DPAPI 仅 Windows**：非 win32 走 DPAPI 会抛 `UNSUPPORTED_PLATFORM`。这类环境改读 `QWENWORK_CREDENTIAL_FILE` 或 `~/.dsh/qwenwork-desktop.json`（见 README「非 Windows 凭据」）。
 2. **DPAPI 依赖 PowerShell 兜底**：本机未安装 `koffi`/`ffi-napi`，走 PowerShell 子进程
    （每进程约几十毫秒）。若环境禁用了 `powershell.exe`，会抛 `DPAPI_FAILED`。
    原生 FFI 路径已实现但未在本机实测（未安装该依赖）——**若集成层需要更低延迟，
