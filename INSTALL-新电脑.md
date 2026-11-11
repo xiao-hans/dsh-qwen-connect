@@ -13,6 +13,8 @@
 
 > ⚠️ **登录态无法从其他电脑拷贝**：`%APPDATA%\QwenWorkCN` 里的凭据用 Windows DPAPI 加密，
 > 密钥绑定当前 Windows 用户账户。**必须在新电脑上重新登录千问办公 App。**
+>
+> 非 Windows 没有 DPAPI。不走上面的一键安装时，可以把登录态写成明文 JSON，见《安装说明》的「非 Windows」：`QWENWORK_CREDENTIAL_FILE` 或 `~/.dsh/qwenwork-desktop.json`（至少含 `token`，续期再加 `refreshToken` / `expiresAt` / `refreshTokenExpiresAt`，权限 `0600`）。
 
 ## 一键安装
 
