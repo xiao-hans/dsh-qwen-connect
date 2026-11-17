@@ -16,6 +16,9 @@ import {
   resolveMachineId,
   describeMachineId,
   resolveRuntimeIdentity,
+  installRootCandidates,
+  installRootsFromRegistryText,
+  registryInstallRoots,
   FALLBACK_COSY_VERSION,
 } from '../../lib/runtime-identity.js';
 
@@ -98,6 +101,90 @@ test('resolveCosyVersion: 真实安装环境下能解析出 1.1.32（集成检�
   } else {
     assert.notEqual(r.detail, '');
   }
+});
+
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 安装根候选：2026-11-16 实机事故
+//   App 装在 D:\qwenwork\QwenWorkCN（NSIS 扁平布局），旧候选表只列
+//   <盘>\Qwen\QwenWorkCN 一类两级布局 → Cosy-Version 静默回退 1.1.32 数个版本。
+// ---------------------------------------------------------------------------
+
+test('installRootCandidates: 覆盖扁平布局 qwenwork/QwenWorkCN 与根下 QwenWorkCN', () => {
+  const drives = process.env.QWEN_INSTALL_DRIVES;
+  process.env.QWEN_INSTALL_DRIVES = 'D:';
+  try {
+    const list = installRootCandidates({ ...process.env, QWEN_INSTALL_DRIVES: 'D:' });
+    assert.ok(list.some((p) => p.toLowerCase() === 'd:\\qwenwork\\qwenworkcn'.toLowerCase()),
+      `缺少扁平布局候选：${list.join(' | ')}`);
+    assert.ok(list.some((p) => p.toLowerCase() === 'd:\\qwenworkcn'.toLowerCase()),
+      '缺少盘符根目录候选');
+    // 旧布局不能因为新增而被丢掉
+    assert.ok(list.some((p) => p.toLowerCase().includes('software\\qwen\\qwenworkcn')), '回归：software 布局丢了');
+  } finally {
+    if (drives === undefined) delete process.env.QWEN_INSTALL_DRIVES;
+    else process.env.QWEN_INSTALL_DRIVES = drives;
+  }
+});
+
+test('installRootCandidates: QWEN_INSTALL_ROOT 排第一（与 check-upstream-contract 同钩子）', () => {
+  const list = installRootCandidates({ QWEN_INSTALL_ROOT: 'Z:\\wherever\\QwenWorkCN', USERPROFILE: process.env.USERPROFILE });
+  assert.equal(list[0], 'Z:\\wherever\\QwenWorkCN');
+});
+
+test('installRootsFromRegistryText: 从卸载项值里抠安装根（GUID 键名/中文 DisplayName 无关）', () => {
+  const text = [
+    'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ffb0f51c-12ba-5803-a677-ac4568a78a2a',
+    '    UninstallString    REG_SZ    "D:\\qwenwork\\QwenWorkCN\\Uninstall QwenWorkCN.exe" /currentuser',
+    '    DisplayIcon    REG_SZ    D:\\qwenwork\\QwenWorkCN\\uninstallerIcon.ico',
+    '    QuietUninstallString    REG_SZ    "D:\\qwenwork\\QwenWorkCN\\Uninstall QwenWorkCN.exe" /currentuser /S',
+  ].join('\r\n');
+  const roots = installRootsFromRegistryText(text);
+  // 只有真实存在的目录才会返回（本测试环境不保证 D: 布局）——所以既接受命中也接受空
+  for (const r of roots) {
+    assert.match(r, /[\\/]QwenWorkCN$/i, `安装根必须以 QwenWorkCN 结尾：${r}`);
+    assert.ok(!/.exe$/i.test(r), '不得把可执行文件当目录');
+  }
+  // 用不存在的盘验证「不返回不存在的路径」这条约束
+  const fake = installRootsFromRegistryText('Q:\\nope\\QwenWorkCN\\Uninstall QwenWorkCN.exe');
+  assert.deepEqual(fake, [], '不存在的目录必须被过滤掉');
+});
+
+test('installRootsFromRegistryText: 取最后一段 QwenWorkCN，DisplayIcon 的 ,0 后缀被清掉', () => {
+  const roots = installRootsFromRegistryText('C:\\a\\QwenWorkCN\\b\\QwenWorkCN.exe,0');
+  for (const r of roots) assert.ok(/[\\/]QwenWorkCN$/.test(r), r);
+});
+
+test('registryInstallRoots: 永不抛异常，返回值是字符串数组', () => {
+  let r;
+  assert.doesNotThrow(() => { r = registryInstallRoots(); });
+  assert.ok(Array.isArray(r));
+  for (const p of r) assert.equal(typeof p, 'string');
+});
+
+test('resolveCosyVersion: 显式 installRoot 时不去扫注册表（测试可控性）', () => {
+  const r = resolveCosyVersion({ env: {}, installRoot: 'Z:\\definitely\\not\\installed\\QwenWorkCN' });
+  assert.equal(r.source, 'fallback');
+  assert.equal(r.version, FALLBACK_COSY_VERSION);
+  assert.equal(r.installRoot, undefined);
+});
+
+test('resolveCosyVersion: 命中时回报 installRoot，供诊断卡片显示来源', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwroot-'));
+  const sub = path.join(root, '9.9.9-20260101');
+  const obfDir = path.join(sub, 'resources', 'app.asar.unpacked', 'node_modules',
+    '@qoder-ai', 'qoder-agent-sdk', 'dist', '_worker');
+  fs.mkdirSync(obfDir, { recursive: true });
+  // 真实 SDK 形态：$A=<版本常量>||"<同一字面量>" 两处必须一致，
+  // 解析器取的是 $A= 之后的**第一个**字面量（回退值与权威值同字面量）
+  fs.writeFileSync(path.join(obfDir, 'qoder-worker-runtime.obf.mjs'),
+    '$A=KS||"9.9.9",o=1;KS="9.9.9";bn(x,{COSY_VERSION:()=>$A});', 'utf8');
+  const r = resolveCosyVersion({ env: {}, installRoot: root });
+  assert.equal(r.version, '9.9.9');
+  assert.equal(r.source, 'obf');
+  assert.equal(r.installRoot, root);
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
