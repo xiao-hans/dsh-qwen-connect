@@ -61,7 +61,7 @@
 lib/              24 .js + README-credentials.md —— 发布主体，也是唯一「改了就得重新部署」的目录
 tools/            22 个 .mjs —— verify-all / check-upstream-contract / package-plugin /
                   install-to-dsh / detect-dsh / 各类 *-check.mjs 与 *-e2e-chat.mjs
-test/             web-status.test.mjs + unit/*.test.mjs(21) + tools/live-check.mjs
+test/             web-status.test.mjs + unit/*.test.mjs(22) + tools/live-check.mjs
 docs/             App升级后失效排查手册.md（升级排障主文档）· DSH本地插件安装规范.md ·
                   Buddy2api借鉴调研报告.md · SSE双通道诊断报告.md · 已知上游边界.md
 research/         wasm.bin + qoder-wasm-glue.mjs（随包发布）；probes-*/、buddy2api-probes/
@@ -125,6 +125,7 @@ node tools/package-plugin.mjs          # 重新生成 dist/（含 zip）
 - 生效的环境钩子：`QWEN_INSTALL_ROOT`（最高优先，插件与契约检查器共用同一变量）、`QWEN_INSTALL_DRIVES`、`QWEN_COSY_VERSION`、`QWEN_APP_VERSION`、`QWEN_MACHINE_ID`、`QWEN_MACHINE_ID_FALLBACK`。
 - 实测：App 1.3.1 → 1.3.2 升级**不影响可用性**（凭证文件 survive，签名与 chat 链路正常）。Cosy-Version 解析命中混淆产物时得到 1.1.71（`source:'obf'`），解析不到时落 `FALLBACK_COSY_VERSION='1.1.32'` 且服务端仍接受。
 - 混淆产物锚点规则（`tools/check-upstream-contract.mjs`）：**锚点里既不许出现变量名，也不许出现兄弟键名**（两者都随构建漂移）。稳定指纹 = 目标结构的独有键（聊天请求体用 `chat_record_id:` + `src.lastIndexOf('return{', at)`，间距守卫 ≤400）。请求体键：`REQUIRED_BODY_KEYS` 20 个固定 + `CONDITIONAL_BODY_KEYS` 4 个条件展开。`body-ctor` 检查在缺键时必须判 `ok:false`（旧实现永远 ok，抓不到真实删除）。
+- 合并上游 lib/ 改动后 `dist/` 会立刻重新落后（PR #3/#4 改了 `lib/auth.js`、`lib/credentials.js` 却没人重打包）：**每次 merge 之后重跑 `node tools/package-plugin.mjs` 并单独提交 dist**。
 - 测试夹具坑：`cosyVersionFromObf` 取 `$A=` 之后的**第一个字面量**，混淆夹具须写成 `$A=KS||"9.9.9",o=1;KS="9.9.9";bn(x,{COSY_VERSION:()=>$A});`，兜底字面量与权威字面量必须一致。
 
 ### 已知限制（不要当 bug 修，见 `docs/已知上游边界.md`）
@@ -136,6 +137,6 @@ node tools/package-plugin.mjs          # 重新生成 dist/（含 zip）
 
 ### DoD
 
-改动算完成，当且仅当：① `node --check` 通过 ② 相关单测通过（`npm test`；全套里那 4 个 ERR_MODULE_NOT_FOUND 是环境缺 peer 依赖所致，属既有状态，须区分而非掩盖）③ `node tools/check-upstream-contract.mjs` 无参数运行 8/8 通过 ④ 已按 §7 部署链路同步 dist + profile 并提示重启 ⑤ 新学到的持久事实已写进 Basic Memory（`main/dsh-workspace/*`）⑥ `docs/` 与本文件若受影响则同步。
+改动算完成，当且仅当：① `node --check` 通过 ② 相关单测通过（`npm test`；win32 基线 246 pass / 5 fail，**须拆开报告**而不是笼统说「历史遗留」：4 个是 ERR_MODULE_NOT_FOUND（本机缺 `@earendil-works/pi-ai`、`@deepseek-ai/dsh-llm` 等宿主 peer 依赖），1 个是 `test/unit/file-credentials.test.mjs` 的 write-back-failure 用例——它用 `fs.chmodSync(dir, 0o555)` 造只读目录，而 Windows 的目录只读属性不阻止在其中建文件，该用例只在 Linux/macOS 成立，属测试的平台假设缺陷，**不要去改 `lib/credentials.js`**）③ `node tools/check-upstream-contract.mjs` 无参数运行 8/8 通过 ④ 已按 §7 部署链路同步 dist + profile 并提示重启 ⑤ 新学到的持久事实已写进 Basic Memory（`main/dsh-workspace/*`）⑥ `docs/` 与本文件若受影响则同步。
 
 **不许**为了让测试通过而放宽断言或删除测试；`test/unit/runtime-identity.test.mjs` 现有 21 例是升级兼容的回归网，改动 `runtime-identity.js` 必须保住它们。
