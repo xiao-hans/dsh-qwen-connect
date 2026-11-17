@@ -17,7 +17,9 @@
  * - **只做静态比对，不发任何网络请求**：可随时跑，不消耗账号积分。
  *   真实可用性请另跑 `tools/seam-live-check.mjs`。
  * - **用「搜索锚点 + 期望值」而非硬编码偏移**：混淆会重排偏移，
- *   锚点（如 `return{request_id:s,`）在换版后仍可定位。
+ *   锚点（如 `return{request_id:<var>,`）在换版后仍可定位。
+ *   ⚠️ 锚点里**只能有键名字面量，不能有混淆变量名**——变量名每次打包都会换，
+ *   写死会让断言在下次升级时集体误报（1.3.2 已踩过，见 findBodyCtor）。
  * - SDK 缺失（未装 App）时**不报失败**，而是退出码 0 + 明确提示
  *   —— 插件本身支持无 App 时的降级路径，本检测不该成为那里的阻塞。
  *
@@ -32,6 +34,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { installRootCandidates as installRootCandidatesLib, registryInstallRoots } from '../lib/runtime-identity.js';
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, '..');
 
@@ -39,20 +43,17 @@ const PLUGIN_ROOT = path.resolve(HERE, '..');
 // SDK 定位
 // ---------------------------------------------------------------------------
 
-/** 候选安装根目录（与 lib/runtime-identity.js 的探测顺序保持一致）。 */
+/**
+ * 候选安装根目录。
+ *
+ * 直接复用 lib 的探测链，**不再各写一份**：本文件旧版自带一份候选表，
+ * 只枚举 `<盘>\software\Qwen\QwenWorkCN` 与 `<盘>\Qwen\QwenWorkCN`，
+ * 于是 2026-11-16 在 `D:\qwenwork\QwenWorkCN` 这台机器上打印
+ * 「未找到千问办公 SDK」并退出码 0 —— 漂移检测从来没真正跑过。
+ * lib 侧现在同时覆盖扁平布局与注册表反查，两边共用就不会再漂移。
+ */
 function installRootCandidates() {
-  const out = [];
-  const env = process.env;
-  if (typeof env.QWEN_INSTALL_ROOT === 'string' && env.QWEN_INSTALL_ROOT.trim() !== '') {
-    out.push(env.QWEN_INSTALL_ROOT.trim());
-  }
-  // 通用枚举 D–Z 盘（用户可能装在任意盘的非标准目录）
-  for (let c = 'D'.charCodeAt(0); c <= 'Z'.charCodeAt(0); c++) {
-    out.push(`${String.fromCharCode(c)}:\\software\\Qwen\\QwenWorkCN`);
-    out.push(`${String.fromCharCode(c)}:\\Qwen\\QwenWorkCN`);
-  }
-  if (typeof env.LOCALAPPDATA === 'string') out.push(path.join(env.LOCALAPPDATA, 'Programs', 'QwenWorkCN'));
-  return out;
+  return [...installRootCandidatesLib(), ...registryInstallRoots()];
 }
 
 /** obf 在版本化子目录内的相对路径。 */
@@ -131,6 +132,52 @@ function resolveSdk() {
 // ---------------------------------------------------------------------------
 
 /**
+ * 聊天请求体的**固定键**集合（1.2.0 规格的 21 固定键里可从对象字面量枚举到的那些）。
+ * 缺任何一个都属于真实漂移，会让插件按旧契约拼的 body 被服务端拒。
+ */
+const REQUIRED_BODY_KEYS = [
+  'request_id', 'request_set_id', 'chat_record_id', 'session_id', 'stream',
+  'chat_task', 'chat_context', 'is_reply', 'is_retry', 'source', 'version',
+  'agent_id', 'task_id', 'session_type', 'model_config', 'custom_model',
+  'system', 'messages', 'tools', 'parameters',
+];
+
+/** 四个**条件展开**键：值可有可无，但键的构造方式必须仍是 `...cond?{k:v}:{}`。 */
+const CONDITIONAL_BODY_KEYS = ['custom_context', 'source_session_id', 'patches', 'business'];
+
+/**
+ * 定位聊天请求体的构造函数。
+ *
+ * ⚠️ 锚点**只认键名字面量，绝不认混淆变量名**。历史事故有两层：
+ *   1. 旧版写死 `'return{request_id:s,'`（1.2.0 的形参恰好叫 `s`）；1.3.2
+ *      重新打包后聊天体变成 `request_id:s` 但**同文件另一处**错误/指标体
+ *      是 `return{request_id:e,` —— indexOf 命中的是**那个函数**。
+ *   2. 于是 body-ctor 枚举出 13 个键（ttft_ms / attempt_count 那一套），
+ *      business、tools 全「不见了」，三项集体误报「契约漂移」。
+ *
+ * 稳定做法：用**只有聊天体才有**的 `chat_record_id:` 当指纹，再回溯到
+ * 包住它的 `return{`。变量名怎么重排都不影响。
+ *
+ * @param {string} src
+ * @returns {{ body: string, index: number, fingerprint: string } | null}
+ */
+function findChatBodyCtor(src) {
+  const fp = 'chat_record_id:';
+  const at = src.indexOf(fp);
+  if (at < 0) return null;
+  const start = src.lastIndexOf('return{', at);
+  if (start < 0 || at - start > 400) return null; // 回溯过远 = 不是同一个对象字面量
+  const tail = src.slice(start, start + 4000);
+  const end = tail.indexOf('}function');
+  return { body: end < 0 ? tail : tail.slice(0, end), index: start, fingerprint: fp };
+}
+
+/** 枚举对象字面量片段里的顶层键名（含条件展开里出现的键）。 */
+function objectKeysOf(body) {
+  return [...new Set([...body.matchAll(/(?:^|[,{])([a-z_][a-z0-9_]*)\s*:/gi)].map((m) => m[1]))];
+}
+
+/**
  * 每项断言的形态：
  *   id      稳定的标识（报告里引用）
  *   why     为什么这条重要（漂移时的后果）
@@ -144,26 +191,25 @@ const CONTRACTS = [
     id: 'body-ctor',
     why: '聊天请求体构造函数；它的顶层键集合就是发行契约',
     check(src) {
-      const anchor = 'return{request_id:s,';
-      const at = src.indexOf(anchor);
-      if (at < 0) return { ok: false, detail: `未找到 body 构造锚点 ${anchor}` };
-      // 取到该 return 对象结束（下一个 `}function` 之前）
-      const tail = src.slice(at, at + 4000);
-      const end = tail.indexOf('}function');
-      const body = end < 0 ? tail : tail.slice(0, end);
-      const keys = [...body.matchAll(/(?:^|[,{])([a-z_][a-z0-9_]*)\s*:/gi)].map((m) => m[1]);
-      const uniq = [...new Set(keys)];
-      // ⚠️ 报告口径：这里统计的是**对象字面量里的全部键**，含 4 个条件展开
-      // （custom_context / source_session_id / patches / business），
-      // 所以 1.2.0 下会得到 25 而非规格里的「21 个固定键」。
-      // 该断言只保证「构造函数仍可定位、键集合可枚举」，**不判定具体键增删** ——
-      // 键级差异请对照 对话/2026-09-24-千问1.2.0适配/recon-body-spec.md。
-      const conditional = ['custom_context', 'source_session_id', 'patches', 'business']
-        .filter((k) => uniq.includes(k));
+      const found = findChatBodyCtor(src);
+      if (found === null) {
+        return { ok: false, detail: '未找到聊天体构造锚点（指纹 chat_record_id: 缺失或回溯不到 return{）' };
+      }
+      const uniq = objectKeysOf(found.body);
+      const missing = REQUIRED_BODY_KEYS.filter((k) => !uniq.includes(k));
+      const conditional = CONDITIONAL_BODY_KEYS.filter((k) => uniq.includes(k));
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          detail: `⚠️ 缺固定键 ${missing.length} 个：${missing.join(', ')}`
+            + `（当前枚举 ${uniq.length} 个：${uniq.join(', ')}）`,
+        };
+      }
       return {
         ok: true,
-        detail: `键 ${uniq.length} 个（含 ${conditional.length} 个条件展开：${conditional.join(', ') || '无'}）`
-          + `；1.2.0 规格为 21 固定键 + 4 条件展开。全部键：${uniq.join(', ')}`,
+        detail: `固定键 ${REQUIRED_BODY_KEYS.length} 个全部命中；条件展开 ${conditional.length}/${CONDITIONAL_BODY_KEYS.length}`
+          + `（${conditional.join(', ') || '无'}）；共枚举 ${uniq.length} 个键`
+          + `；定位方式：指纹 ${found.fingerprint} @${found.index}`,
         keys: uniq,
       };
     },
@@ -172,16 +218,17 @@ const CONTRACTS = [
     id: 'body-business',
     why: '缺 business → 恒定 503 Model catalog unavailable（2026-09-24 的真凶）',
     check(src) {
-      const at = src.indexOf('return{request_id:s,');
-      if (at < 0) return { ok: false, detail: '未找到 body 构造锚点，无法检查 business' };
-      const body = src.slice(at, at + 4000);
-      // SDK 里 business 是条件展开：...void 0!==m?{business:m}:{}
-      const hasConditional = /\{business:\s*m\}/.test(body);
+      const found = findChatBodyCtor(src);
+      if (found === null) return { ok: false, detail: '未找到聊天体构造锚点，无法检查 business' };
+      const { body } = found;
+      // SDK 里 business 是条件展开：...void 0!==<var>?{business:<var>}:{}
+      // 只看「是否存在 business 键的条件展开」，不认变量名
+      const m = /\{business:\s*([A-Za-z_$][\w$]*)\}/.exec(body);
       return {
-        ok: true,
-        detail: hasConditional
-          ? '存在条件展开 {business:m}（SDK 形态未变）；注意服务端要求该键必须存在且含 product'
-          : '⚠️ 未见到 {business:m} 条件展开，SDK 可能已改变 business 的构造方式',
+        ok: m !== null,
+        detail: m !== null
+          ? `存在条件展开 {business:${m[1]}}（SDK 形态未变）；注意服务端要求该键必须存在且含 product`
+          : '⚠️ body 内未见 business 条件展开，SDK 可能已改变 business 的构造方式（后果：恒定 503）',
       };
     },
   },
@@ -189,9 +236,9 @@ const CONTRACTS = [
     id: 'body-tools',
     why: 'tools 必须恒为数组（不得省略键），否则偏离上游契约',
     check(src) {
-      const at = src.indexOf('return{request_id:s,');
-      if (at < 0) return { ok: false, detail: '未找到 body 构造锚点' };
-      const body = src.slice(at, at + 4000);
+      const found = findChatBodyCtor(src);
+      if (found === null) return { ok: false, detail: '未找到聊天体构造锚点' };
+      const { body } = found;
       const m = /tools:\s*([^,}]+)/.exec(body);
       if (m === null) return { ok: false, detail: '⚠️ body 内未见 tools 字段' };
       const expr = m[1].trim();

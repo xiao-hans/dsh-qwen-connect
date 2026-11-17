@@ -54,7 +54,9 @@
 - **强佐证**：`vg()` 产出的 `client_type`/`business_product`/`business_type`/`scene`
   与插件 `CLIENT_METADATA` **逐字段吻合**（`"6"`/`"qoder_work"`/`"agent"`/`"assistant"`）
   —— 即签名头 `Cosy-Business-Product` 与 body 的 `business.product` **天然同源**，填别的值会自相矛盾。
-- body 构造锚点：搜索 `return{request_id:s,`（1.2.0 的 SDK 含 21 个顶层键）。
+- body 构造锚点：搜索 `return{request_id:`（正则 `return\{request_id:[A-Za-z_$][\w$]*,`；
+  1.2.0 的 SDK 含 21 个顶层键）。**不要把后面那个混淆变量名写进锚点**：`s` 是 1.2.0 的形参名，
+  1.3.2 已变成 `e`，写死会让 body-ctor / body-business / body-tools 三项同时误报。
 
 ### 2.2 签名载荷字段结构
 
@@ -68,7 +70,14 @@
 - `kpe` / `dg` / `vg` / `$Wc` / `Bwr` / 偏移 `8815338` 等都是**混淆产物，每次打包全部重排**。
 - **不影响运行**（运行靠字段值），但注释里的证据坐标会失效，下次必须重新定位。
 - 改进方向：注释从「偏移引用」改为「**搜索锚点 + 期望值**」，
-  例如「`return{request_id:s,` 之后的 `tools:<expr>??[]`；该表达式在全 SDK 仅出现 1 次」。
+  例如「`chat_record_id:` 所在对象字面量里的 `tools:<expr>??[]`；该表达式在全 SDK 仅出现 1 次」。
+- ⚠️ 2026-11-17 补充：**锚点里连兄弟键名都不能带**。1.3.2 在聊天体开头多插了
+  `defaultReasoningEffort:p`，于是 `return{request_id:` 不再匹配聊天体——但它**仍匹配到
+  同文件另一处**（错误/指标构造函数，13 键，无 business / tools）。旧检测因此把
+  body-ctor / body-business / body-tools 三项一起误报成漂移。唯一可靠的指纹是
+  **只有聊天体才有的键** `chat_record_id:`，再用 `lastIndexOf('return{', at)` 回溯框住对象。
+- 现状：`tools/check-upstream-contract.mjs` 已按此改写，并且真的断言 20 个固定键 +
+  4 个条件展开键的**存在性**（旧版只报「键集合可枚举」，键真丢了也不报警）。
 
 ### 2.4 WASM 行为
 
