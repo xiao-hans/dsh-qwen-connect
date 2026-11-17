@@ -26,7 +26,7 @@
 |---|---|
 | Provider 注册（模型出现在 DSH 模型选择器，名称含倍率） | ✅ |
 | 设置卡片：账号 / 积分 / 套餐 / 模型列表（含配额进度条） | ✅ |
-| 凭据解密（Chromium v10 + Windows DPAPI） | ✅ |
+| 凭据（Windows DPAPI，或非 Windows 明文 JSON） | ✅ |
 | 账号 / 额度 / 套餐 REST 查询 | ✅ |
 | **真实对话**（WASM 签名 + SSE 聊天端点） | ✅ |
 | **流式输出 + 多轮上下文** | ✅ |
@@ -252,9 +252,25 @@ JSON 就拆连接」的真实 socket 用例，验证它不再悬挂且一定留�
 回归测试：`node --import ./tmp/with-dsh-sdk.mjs --test test/unit/stall-guard-stop.test.mjs`。
 判定口径本身（哪些正文算半途停止）由 `test/unit/stall-guard.test.mjs` 锁定。
 
+## 非 Windows 凭据
+
+Windows 上默认仍读 `%APPDATA%\QwenWorkCN` 的 DPAPI 加密凭据。没有 DPAPI 的系统
+（Linux / macOS）可以改用明文 JSON。只有**没显式传入 `appDataDir`** 时才会读它：
+
+| 优先级 | 位置 |
+|---|---|
+| 1 | 环境变量 `QWENWORK_CREDENTIAL_FILE` |
+| 2 | `~/.dsh/qwenwork-desktop.json` |
+
+JSON 对象至少要有字符串字段 `token`。自动续期还会用到 `refreshToken`、`expiresAt`、
+`refreshTokenExpiresAt`；其它字段原样保留。刷新成功后写回同一文件（先写同目录临时文件，
+再改名替换）。这个文件里是登录态明文，权限用 `0600`，不要提交进仓库。
+文件不存在时仍走原来的 DPAPI 路径。JSON 损坏或缺少 `token` 时抛
+`QwenAuthError`（`SCHEMA_INVALID`），提示里带文件路径。
+
 ## 已知限制
 
-1. **仅 Windows**：凭据解密走 Windows DPAPI。
+1. **Windows 加密凭据绑定当前用户**：默认路径走 DPAPI，`auth-v2.dat` 不能拷到别的机器或账户。其它平台用上面的明文 JSON。
 2. **工具调用已透传，视觉输入仍不支持**：`tool_calls` 分片（含 `index`/`id`/
    `function`）原样转成 OpenAI 形状，收尾时把上游常标的 `stop` 纠正为
    `tool_calls`；图片输入仍会被 shim 丢弃（`toQwenWorkMessages()` 只保留
