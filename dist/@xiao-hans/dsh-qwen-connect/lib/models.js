@@ -235,6 +235,24 @@ export function toPiModel(info, baseUrl, opts = {}) {
      * 会被当作普通 text 输出，用户会在回答里看到模型的内心独白。
      */
     reasoning: true,
+    /**
+     * 思考开关握手（QwenWork 网关不支持，2026-11-08 实测）：
+     *
+     * pi-ai 对 openai-completions API 按 `compat.thinkingFormat` 决定发不发
+     * `enable_thinking`（qwen / qwen-chat-template 两种格式）。不声明时
+     * auto-detect 会因 baseUrl 是 127.0.0.1 环回 shim 而落到默认 openai，
+     * 宿主设 thinking="off" 只是不发 reasoning_effort，请求体里没有任何
+     * 关思考字段。
+     *
+     * 实测（research/buddy2api-probes/probe-disable-thinking.mjs：5 变体对照；
+     * probe-flash-thinking.mjs：flash 模型 3 变体）：QwenWork 网关对
+     * `enable_thinking:false`、`chat_template_kwargs.enable_thinking:false`、
+     * `reasoning_effort:"none"`、`is_reasoning:false` 全部无视，思考照发。
+     * 所以这里**刻意不声明** compat.thinkingLevelMap / thinkingFormat：发了
+     * 也是无效字段，反而让 pi-ai 以为关思考已生效。上游强制思考，
+     * 宿主端的正确姿态是容忍 thinking 通道（pi-hermes-memory 的
+     * thinking-channel recovery 那样从 thinking 块恢复答案）。
+     */
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: info.contextWindow,
     maxTokens: info.maxTokens,

@@ -487,7 +487,9 @@ export function resolveModelKey(body) {
  *
  * 目录里查不到的模型按 SDK 的兜底取 `false`——不凭空声明能力。注意
  * `is_reasoning` 还会被 SDK 按 `thinkingBudget === 0` / `reasoning_effort === "none"`
- * 降级为 false（规格 §3.6）；本插件不主动关闭思考，故不做该降级。
+ * 降级为 false（规格 §3.6）；但实测该降级对上游无效（QwenWork 网关强制思考，
+ * 2026-11-08 probe-disable-thinking.mjs 五变体对照），插件不做也无法做思考开关。
+ * 上游无法关闭的应对见 models.js `toPiModel()` 里「思考开关握手」注释。
  *
  * ⚠️ **`is_vl` 绝不可用作「是否发送图片」的开关**（t7 实测）：
  *   - 上游**不看**该字段——实测 `is_vl:false` 时上游照样正常识图；

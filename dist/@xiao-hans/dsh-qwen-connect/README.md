@@ -270,6 +270,12 @@ JSON 就拆连接」的真实 socket 用例，验证它不再悬挂且一定留�
 7. **`Cosy-Version` 动态解析**：优先读 App 产物里 SDK 的 `COSY_VERSION`
    常量（实测 `1.1.32`），失败时回退安装目录版本号，最后回退常量。
    来源会记在 `signerSession.describe().cosyVersion.source` 里。
+8. **思考链无法关闭**：QwenWork 网关服务端强制思考，实测对
+   `enable_thinking:false`、`chat_template_kwargs.enable_thinking:false`、
+   `reasoning_effort:"none"` 等客户端字段全部无视（research/buddy2api-probes/
+   probe-disable-thinking.mjs 五变体对照）。宿主设 thinking="off" 只是不请求
+   思考，并不能关掉它。DSH 侧应容忍 thinking 通道（pi-ai 会把
+   `reasoning_content` 转成独立 thinking 块，不污染正文）。
 
 ## 聊天接入架构（阶段 A-2）
 
