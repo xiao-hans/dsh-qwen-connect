@@ -185,8 +185,14 @@ function main() {
   fs.rmSync(zipPath, { force: true });
   let zipped = false;
   try {
-    // tar 打包必须用相对路径且 cwd 在 outRoot，否则压缩包内会带完整绝对路径
-    execFileSync('tar', ['-a', '-c', '-f', zipPath, pkgName], {
+    // tar 打包必须用相对路径且 cwd 在 outRoot，否则压缩包内会带完整绝对路径。
+    // ⚠️ 成员名必须显式加 './' 前缀：pkgName 是 scoped 包名（@xiao-hans/...），
+    //    bsdtar 会把开头的 '@' 当成特殊前缀吃掉，报
+    //    "tar: Failed to open 'xiao-hans/dsh-qwen-connect'" 并退出码 1；
+    //    更糟的是它失败前已经写出 22 字节的空 zip（只有 EOCD），
+    //    留着就是「看着能装、实际是空包」的陷阱 → catch 分支里一并删掉。
+    //    2026-11-17 打 0.2.5 包时正是这条静默失败。
+    execFileSync('tar', ['-a', '-c', '-f', zipPath, './' + pkgName], {
       cwd: outRoot,
       stdio: 'pipe',
       timeout: 120000,
@@ -195,6 +201,7 @@ function main() {
   } catch (e) {
     // 没有 tar（极老的 Windows）时降级：只留解包目录，并明确告知
     console.log(`   ⚠️ 未能生成 zip（${String(e.message).split('\n')[0].slice(0, 60)}）`);
+    fs.rmSync(zipPath, { force: true });
   }
   if (zipped) {
     const kb = (fs.statSync(zipPath).size / 1024).toFixed(1);
