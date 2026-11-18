@@ -112,6 +112,92 @@ export const FALLBACK_QWENWORK_MODELS = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// 生效目录（动态优先，静态兜底）
+// ---------------------------------------------------------------------------
+
+/**
+ * 当前生效的模型目录。
+ *
+ * 为什么状态放在 models.js 而不是拉取模块里：`normalizeModelKey()`（chat-shim
+ * 路由用）、`catalogForCard()`（卡片用）、`toPiModel()`（选择器用）三个消费点
+ * 分散在两个模块，且 chat-shim 的调用签名早已固定为单参数。把「哪份目录生效」
+ * 收敛在这里，拉取模块只负责写入，消费点无需改签名即可同步看到新模型；
+ * 也避免 models.js ← model-catalog.js 的循环 import。
+ *
+ * 失败语义：上游拉取失败**不清空**已有目录——保留上一次成功的真实结果并标记
+ * stale，比退回静态表更接近事实（静态表可能已不含上游在售模型）。
+ */
+let activeCatalog = FALLBACK_QWENWORK_MODELS;
+let catalogMeta = { source: 'fallback', fetchedAt: null, stale: false, error: null };
+
+/** 读当前生效目录（只读用途，调用方不得原地修改）。 */
+export function getActiveCatalog() {
+  return activeCatalog;
+}
+
+/** 目录来源元信息，供卡片如实标注「上游实时 / 静态兜底 / 已过期」。 */
+export function getCatalogMeta() {
+  return { ...catalogMeta, count: activeCatalog.length };
+}
+
+/**
+ * 用上游目录替换生效目录。
+ *
+ * @param {Array<object>} entries 已归一化的条目（见 model-catalog.js）
+ * @param {{ fetchedAt?: string }} [meta]
+ * @returns {boolean} 是否真的替换了（空数组一律拒绝，避免把 provider 清空）
+ */
+export function setActiveCatalog(entries, meta = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) return false;
+  activeCatalog = entries;
+  catalogMeta = {
+    source: 'upstream',
+    fetchedAt: meta.fetchedAt ?? new Date().toISOString(),
+    stale: false,
+    error: null,
+  };
+  return true;
+}
+
+/**
+ * 记录一次拉取失败。**不动条目本身**，只把状态标脏，让卡片能说明
+ * 「显示的是上次成功的目录」而不是假装实时。
+ *
+ * @param {unknown} error
+ */
+export function markCatalogStale(error) {
+  catalogMeta = {
+    ...catalogMeta,
+    stale: true,
+    error: error instanceof Error ? error.message : String(error ?? 'unknown'),
+  };
+}
+
+/**
+ * 退回静态兜底目录并清空来源元信息（供测试与卸载使用，与 perf.js 的
+ * resetPerf() 同一惯例）。正常拉取失败**不该**调它——保留上一次成功的
+ * 真实目录比退回可能已过期的静态表更接近事实。
+ */
+export function resetCatalog() {
+  activeCatalog = FALLBACK_QWENWORK_MODELS;
+  catalogMeta = { source: 'fallback', fetchedAt: null, stale: false, error: null };
+}
+
+/**
+ * 按宿主 id / 展示 id / 上游 key 查目录条目（先查生效目录，再查静态回退）。
+ *
+ * @param {string} model
+ * @returns {object | undefined}
+ */
+export function findModelInfo(model) {
+  if (typeof model !== 'string' || model === '') return undefined;
+  return (
+    activeCatalog.find((m) => m.id === model || m.displayNameId === model) ??
+    FALLBACK_QWENWORK_MODELS.find((m) => m.id === model || m.displayNameId === model)
+  );
+}
+
 /**
  * 把宿主传来的模型标识归一化回**上游 model_config.key**。
  *
@@ -126,9 +212,7 @@ export const FALLBACK_QWENWORK_MODELS = [
  */
 export function normalizeModelKey(model) {
   if (typeof model !== 'string' || model === '') return model;
-  const info = FALLBACK_QWENWORK_MODELS.find(
-    (m) => m.id === model || m.displayNameId === model,
-  );
+  const info = findModelInfo(model);
   return info === undefined ? model : info.id;
 }
 
@@ -167,6 +251,11 @@ export function displayName(info) {
   if (info.isDefault === true) parts.push('默认');
   if (info.isRecommended === true) parts.push('推荐');
   if (info.isNew === true) parts.push('新');
+  // 上游促销徽章（如「限时2折」）如实透传：它是上游 promotion.badge 的原文，
+  // 不是插件算出来的折扣。没有促销就不加这一段。
+  if (typeof info.promotionLabel === 'string' && info.promotionLabel !== '') {
+    parts.push(info.promotionLabel);
+  }
   return parts.join(' · ');
 }
 
@@ -179,14 +268,16 @@ export function displayName(info) {
 function describeModel(info) {
   const rate = formatRate(info.billingRate);
   const ctx = info.contextWindow >= 1000000 ? '1M' : `${Math.round(info.contextWindow / 1000)}K`;
-  return [`仅文本`, ctx, rate === '' ? undefined : rate === '免费' ? '免费' : rate]
+  // 模态按目录声明如实写：上游 is_vl 为真就是图文，不能一律写「仅文本」。
+  const modality = info.supportsImages === true ? '图文' : '仅文本';
+  return [modality, ctx, rate === '' ? undefined : rate === '免费' ? '免费' : rate]
     .filter(Boolean)
     .join(' · ');
 }
 
 /** 供卡片展示的精简模型行。 */
 export function catalogForCard() {
-  return FALLBACK_QWENWORK_MODELS.map((model) => ({
+  return getActiveCatalog().map((model) => ({
     id: model.id,
     // 卡片显示短名（倍率已单独成列），选择器则用带倍率的长名。
     name: model.shortName ?? model.id,
@@ -195,6 +286,9 @@ export function catalogForCard() {
     ...(model.isDefault === true ? { isDefault: true } : {}),
     ...(model.isRecommended === true ? { isRecommended: true } : {}),
     ...(model.isNew === true ? { isNew: true } : {}),
+    ...(typeof model.promotionLabel === 'string' && model.promotionLabel !== ''
+      ? { promotionLabel: model.promotionLabel }
+      : {}),
   }));
 }
 

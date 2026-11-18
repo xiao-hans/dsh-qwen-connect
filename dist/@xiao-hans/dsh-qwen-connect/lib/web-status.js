@@ -98,6 +98,7 @@ function toErrorPayload(error) {
  *   getAccountContext: () => Promise<any>,
  *   tokenAvailable: () => Promise<boolean>,
  *   models: () => Array<{ id: string, name: string, description?: string }>,
+ *   catalog?: () => { source: string, fetchedAt: string|null, stale: boolean, count: number },
  *   provider: string,
  * }} deps
  */
@@ -180,6 +181,18 @@ export async function qwenWorkWebStatus(deps) {
     if (Array.isArray(models) && models.length > 0) status.models = models;
   } catch {
     /* 模型目录缺失不影响卡片主要信息 */
+  }
+
+  // ---- 目录来源（上游实时 / 静态兜底 / 已过期）-----------------------
+  // 卡片必须能区分「这是上游刚给的」与「这是内置兜底表」，否则用户会把
+  // 过期目录当成实时在售列表。无该能力时不产出字段，卡片据此不渲染。
+  try {
+    const catalog = deps.catalog?.();
+    if (catalog !== null && catalog !== undefined && typeof catalog === 'object') {
+      status.catalog = catalog;
+    }
+  } catch {
+    /* 目录元信息缺失不影响卡片主要信息 */
   }
 
   // ---- 上游性能指标（来自 shim 的实测采样）-----------------------------

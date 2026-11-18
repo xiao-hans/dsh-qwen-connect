@@ -55,7 +55,7 @@ function collectFiles() {
   }
 
   // 顶层必需文件
-  for (const name of ['cordis.patch.yml', 'package.json', 'README.md', 'INSTALL-新电脑.md', 'LICENSE']) {
+  for (const name of ['cordis.patch.yml', 'package.json', 'README.md', 'LICENSE']) {
     addIfFile(name);
   }
 
@@ -67,9 +67,6 @@ function collectFiles() {
   addIfFile('tools/install-to-dsh.mjs');
   // profile 自动探测：安装器依赖它适配不同 DSH 版本（Desktop / CLI / 自定义）
   addIfFile('tools/detect-dsh.mjs');
-  // 一键脚本：双击即可安装/卸载，免去手敲命令
-  addIfFile('一键安装.cmd');
-  addIfFile('一键卸载.cmd');
   // 渲染自检：无浏览器也能验证卡片组件不崩、数据渲染正确
   addIfFile('tools/client-render-check.mjs');
   // 模型显示预览：确认倍率/标记映射到选择器的效果
@@ -181,7 +178,8 @@ function main() {
   //
   // 用系统自带的 tar（Windows 10+ 内置 bsdtar）而非引入 zip 依赖：
   // 插件本身零运行时依赖，打包工具也不该为一个 zip 引入第三方包。
-  const zipPath = path.join(outRoot, `${pkgName}-${version}.zip`);
+  const zipName = `${pkgName}-${version}.zip`;
+  const zipPath = path.join(outRoot, zipName);
   fs.rmSync(zipPath, { force: true });
   let zipped = false;
   try {
@@ -192,7 +190,11 @@ function main() {
     //    更糟的是它失败前已经写出 22 字节的空 zip（只有 EOCD），
     //    留着就是「看着能装、实际是空包」的陷阱 → catch 分支里一并删掉。
     //    2026-11-17 打 0.2.5 包时正是这条静默失败。
-    execFileSync('tar', ['-a', '-c', '-f', zipPath, './' + pkgName], {
+    // ⚠️ `-f` 也必须用**相对文件名**：cwd 已在 outRoot，而传绝对路径
+    //    （`D:\DSH workspace\...`）会被 bsdtar 当成 `host:path` 远程语法（盘符
+    //    冒号），报 "Cannot connect to D: resolve failed" 类错误。2026-11-18
+    //    打 0.2.7 包时实测：改相对名后同一命令立即成功。
+    execFileSync('tar', ['-a', '-c', '-f', zipName, './' + pkgName], {
       cwd: outRoot,
       stdio: 'pipe',
       timeout: 120000,
@@ -209,13 +211,14 @@ function main() {
     console.log('');
   }
 
-  console.log('下一步（在本机）：');
+  console.log('下一步（发布）：');
+  console.log('  npm publish --registry https://registry.npmjs.org');
+  console.log('');
+  console.log('本机调试接线（改源码即时生效）：');
   console.log(`  node tools/install-to-dsh.mjs --source "${stageDir}"`);
   console.log('');
-  console.log('拷到别的电脑：');
-  console.log(`  1. 把 ${zipped ? path.basename(zipPath) + '（或解包后的 ' + pkgName + '/ 目录）' : `${pkgName}/ 整个目录`} 复制过去`);
-  console.log('  2. 解压到任意目录');
-  console.log('  3. 双击其中的「一键安装.cmd」');
+  console.log('别的电脑安装：');
+  console.log('  cd <DSH profile 目录> && pnpm add @xiao-hans/dsh-qwen-connect');
   console.log('  详见包内「安装说明.md」');
 }
 

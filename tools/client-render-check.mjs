@@ -134,13 +134,25 @@ try {
   process.exit(1);
 }
 
-if (slotsRegistered.length !== 2) {
-  console.error(`❌ 期望注册 2 个席位（设置卡片 + 输入框积分读数），实际 ${slotsRegistered.length}`);
+// 四个席位：插件列表卡片 + 设置页一级导航页面 + 导航图标 + 输入框积分读数。
+const EXPECTED_SEATS = [
+  'settings.plugin.item',
+  'settings.section',
+  'settings.section.icon',
+  'conversation.input.left',
+];
+const missingSeats = EXPECTED_SEATS.filter(
+  (name) => !slotsRegistered.some((s) => s.meta.name === name),
+);
+if (missingSeats.length > 0 || slotsRegistered.length !== EXPECTED_SEATS.length) {
+  console.error(
+    `❌ 席位不符：期望 ${EXPECTED_SEATS.join(' / ')}，实际 ${slotsRegistered.map((s) => s.meta.name).join(' / ')}`,
+  );
   process.exit(1);
 }
 
 // ---- SSR 渲染：两种状态都要能渲染 ----
-const { Component, meta } = slotsRegistered[0];
+const { Component, meta } = slotsRegistered.find((s) => s.meta.name === 'settings.plugin.item');
 const composer = slotsRegistered.find((s) => s.meta.name === 'conversation.input.left');
 if (composer === undefined) {
   console.error('❌ 未注册 conversation.input.left 积分读数');
@@ -400,6 +412,90 @@ composerCase('next 缺省走 lastUsed', { remaining: 100 }, () => ({ lastUsed: {
 ]);
 // 宿主未注入 useProjection（离线/降级）时必须静默，不能抛进 DSH 的插槽渲染
 composerCase('无 useProjection', { remaining: 100 }, undefined);
+
+// ---- 设置页一级导航（surface='settings'）----
+// 宿主已给页面外壳：卡片不得再渲染自己的折叠按钮（aria-expanded），
+// 且必须始终展开——否则用户点进导航只看到一个收起的标题。
+const section = slotsRegistered.find((s) => s.meta.name === 'settings.section');
+const sectionInject = section.meta.inject();
+if (sectionInject.surface !== 'settings') {
+  console.log('  ❌ settings.section 未传 surface=settings');
+  failures++;
+}
+const sectionState = {
+  status: 'signed-in',
+  nickname: '林子',
+  remaining: 2092.36,
+  models: [
+    { id: 'pro', name: '高级', rate: 1, isDefault: true },
+    { id: 'qwen4-max', name: 'Qwen4-Max', rate: 0.4, isNew: true, promotionLabel: '限时2折' },
+  ],
+  catalog: { source: 'upstream', stale: false, fetchedAt: '2026-11-18T03:33:49.430Z', count: 2 },
+};
+
+/** 渲染一级导航页面，断言展开、无折叠外壳、且来源如实标注。 */
+function sectionCase(label, state, mustContain = [], mustNotContain = []) {
+  try {
+    const html = server.renderToStaticMarkup(
+      react.createElement(section.Component, { t, initialState: state, surface: 'settings' }),
+    );
+    const missing = mustContain.filter((needle) => !html.includes(needle));
+    const leaked = mustNotContain.filter((needle) => html.includes(needle));
+    if (missing.length > 0 || leaked.length > 0) {
+      console.log(`  ❌ ${label}: 缺少 ${JSON.stringify(missing)} 不应出现 ${JSON.stringify(leaked)}`);
+      failures++;
+    } else {
+      console.log(`  ✅ ${label}: ${html.length} 字节`);
+    }
+    return html;
+  } catch (e) {
+    console.log(`  ❌ ${label} 抛异常: ${e.message}`);
+    failures++;
+    return '';
+  }
+}
+
+sectionCase('一级导航：展开且无折叠外壳', sectionState, ['高级', 'Qwen4-Max', '限时2折'], ['aria-expanded']);
+sectionCase('目录来源：上游实时', sectionState, ['上游实时目录']);
+sectionCase(
+  '目录来源：拉取失败保留旧目录',
+  { ...sectionState, catalog: { ...sectionState.catalog, stale: true } },
+  ['显示上次成功的目录'],
+);
+sectionCase(
+  '目录来源：静态兜底',
+  { ...sectionState, catalog: { source: 'fallback', stale: false, fetchedAt: null, count: 3 } },
+  ['内置兜底目录'],
+  ['上游实时目录'],
+);
+// 宿主没给 catalog 字段（旧版 host）：不渲染来源行，不编造「实时」
+sectionCase(
+  '无 catalog 字段',
+  { status: 'signed-in', models: sectionState.models },
+  ['高级'],
+  ['上游实时目录', '内置兜底目录'],
+);
+
+// 导航图标：单色 SVG，随尺寸缩放，非活跃态降透明度
+try {
+  const icon = slotsRegistered.find((s) => s.meta.name === 'settings.section.icon');
+  const activeHtml = server.renderToStaticMarkup(react.createElement(icon.Component, { size: 16 }));
+  const idleHtml = server.renderToStaticMarkup(
+    react.createElement(icon.Component, { size: 20, active: false }),
+  );
+  if (!activeHtml.includes('<svg') || !activeHtml.includes('currentColor')) {
+    console.log('  ❌ 导航图标不是单色 SVG');
+    failures++;
+  } else if (!idleHtml.includes('width="20"') || !idleHtml.includes('0.75')) {
+    console.log('  ❌ 导航图标未响应 size / active');
+    failures++;
+  } else {
+    console.log('  ✅ 导航图标：单色 SVG、随尺寸与活跃态变化');
+  }
+} catch (e) {
+  console.log(`  ❌ 导航图标渲染抛异常: ${e.message}`);
+  failures++;
+}
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} 项检查失败`);

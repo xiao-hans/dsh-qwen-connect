@@ -104,11 +104,30 @@ const ctx = {
 
 mod.apply(ctx);
 
-assert.equal(registrations.length, 2, '必须注册两个席位：设置卡片 + 输入框积分读数');
+assert.equal(
+  registrations.length,
+  4,
+  '必须注册四个席位：插件列表卡片 + 设置页一级导航 + 导航图标 + 输入框积分读数',
+);
 const card = registrations.find((r) => r.descriptor.name === 'settings.plugin.item');
 const credits = registrations.find((r) => r.descriptor.name === 'conversation.input.left');
+const section = registrations.find((r) => r.descriptor.name === 'settings.section');
+const sectionIcon = registrations.find((r) => r.descriptor.name === 'settings.section.icon');
 assert.ok(card !== undefined, '必须注册到插件设置页的 slot');
 assert.ok(credits !== undefined, '必须注册到输入框工具栏的积分读数');
+assert.ok(section !== undefined, '必须注册设置页一级导航页面');
+assert.ok(sectionIcon !== undefined, '必须注册导航图标（否则导航行没图标）');
+
+// 一级导航：页面与图标共用同一个 id，surface 必须是 settings（卡片据此
+// 去掉自带的折叠外壳），否则设置页里会出现双层卡片。
+assert.equal(section.descriptor.id, 'qwenwork', '导航页面席位 id');
+assert.equal(sectionIcon.descriptor.id, section.descriptor.id, '图标与页面必须同 id');
+assert.equal(typeof section.descriptor.order, 'number', '导航席位要有 order');
+assert.equal(section.descriptor.locale, 'settings.qwenwork', '导航席位要走本插件文案命名空间');
+assert.equal(section.descriptor.inject().surface, 'settings', '一级导航必须以 settings 面渲染');
+assert.equal(typeof section.component, 'function', '导航页面第二参数必须是组件函数');
+assert.equal(typeof sectionIcon.component, 'function', '导航图标第二参数必须是组件函数');
+line(`✔ slot 注册: name=settings.section id=${section.descriptor.id} order=${section.descriptor.order} + icon`);
 
 const { descriptor, component } = card;
 line(`✔ slot 注册: name=${descriptor.name} key=${descriptor.key} priority=${descriptor.priority}`);

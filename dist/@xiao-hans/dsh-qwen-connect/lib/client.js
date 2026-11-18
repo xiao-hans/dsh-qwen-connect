@@ -25,6 +25,8 @@ window.__ModuleLoader__.load({
     const QWENWORK_STATUS_PATH = '/plugins/dsh-qwen-connect/status';
     /** 与 lib/models.js 的 QWENWORK_PROVIDER 保持一致（同样无法 import host）。 */
     const QWENWORK_PROVIDER = 'qwenwork';
+    /** 设置页一级导航的席位 id（页面与图标共用同一个）。 */
+    const QWENWORK_SETTINGS_SECTION_ID = 'qwenwork';
     const POLL_INTERVAL_MS = 60000;
     /** 输入框工具栏的积分读数单独用更长的轮询节奏——它是常驻的，不像卡片那样
      *  只在展开时才拉取，60s 已足够，且省掉一半对状态接口的重复请求。 */
@@ -77,6 +79,19 @@ window.__ModuleLoader__.load({
       gap: 10,
       borderTop: '1px solid var(--dsw-alias-border-l2)',
       padding: '13px 14px',
+    };
+    // surface='settings'：宿主已给页面外壳与标题，卡片去掉自己的边框与
+    // 折叠分隔线，否则设置页里会出现「页中页」的双层卡片。
+    const embeddedCardStyle = {
+      display: 'flex',
+      flexDirection: 'column',
+      minWidth: 0,
+    };
+    const embeddedBodyStyle = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+      minWidth: 0,
     };
     const rowStyle = {
       display: 'flex',
@@ -327,6 +342,10 @@ window.__ModuleLoader__.load({
       if (model.isDefault === true) badges.push(t('badgeDefault'));
       if (model.isRecommended === true) badges.push(t('badgeRecommended'));
       if (model.isNew === true) badges.push(t('badgeNew'));
+      // 上游促销徽章原文（如「限时2折」）——不是插件算的折扣，照搬即可。
+      if (typeof model.promotionLabel === 'string' && model.promotionLabel !== '') {
+        badges.push(model.promotionLabel);
+      }
 
       return react_jsx_runtime.jsxs(
         'div',
@@ -572,6 +591,7 @@ window.__ModuleLoader__.load({
               style: sectionStyle,
               children: [
                 react_jsx_runtime.jsx('h3', { style: sectionTitleStyle, children: t('models') }, 'title'),
+                react_jsx_runtime.jsx(CatalogSource, { catalog: state.catalog, t }, 'catalog-source'),
                 // `model.id` 在构造 key 时被读取，null 项会在此抛异常 → 先过滤。
                 ...state.models
                   .filter((model) => model !== null && typeof model === 'object')
@@ -595,10 +615,64 @@ window.__ModuleLoader__.load({
       });
     }
 
+    /**
+     * 目录来源说明行。
+     *
+     * 为什么必须有：静态兜底表会过期（实测上游已用 qwen4-max 取代
+     * qwen3.8-max-preview）。不标来源，用户会把兜底表当成实时在售列表。
+     * 宿主没给 catalog 字段时返回 null，不编造「实时」。
+     */
+    function CatalogSource(props) {
+      const catalog = props.catalog;
+      const t = props.t;
+      if (catalog === null || typeof catalog !== 'object') return null;
+      let text;
+      if (catalog.source === 'upstream') {
+        text = catalog.stale === true ? t('catalogStale') : t('catalogLive');
+      } else {
+        text = t('catalogFallback');
+      }
+      const at = typeof catalog.fetchedAt === 'string' ? new Date(catalog.fetchedAt) : null;
+      if (at !== null && !Number.isNaN(at.getTime())) {
+        text = `${text} · ${t('catalogUpdatedAt', { time: at.toLocaleTimeString() })}`;
+      }
+      return react_jsx_runtime.jsx('div', {
+        style: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+        children: text,
+      });
+    }
+
+    /**
+     * 设置页导航图标。
+     *
+     * 单色 SVG + currentColor（与 WorkBuddy 默认图标同一做法）：随宿主主题走，
+     * 不引外部图片、不发网络请求，也不声称自己是官方品牌标。
+     */
+    function QwenWorkNavIcon(props) {
+      const edge = typeof props.size === 'number' ? props.size : 16;
+      return react_jsx_runtime.jsxs('svg', {
+        width: edge,
+        height: edge,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 2,
+        strokeLinecap: 'round',
+        'aria-hidden': true,
+        style: { flexShrink: 0, ...props.style },
+        children: [
+          react_jsx_runtime.jsx('circle', { cx: 11, cy: 11, r: 7 }, 'ring'),
+          react_jsx_runtime.jsx('path', { d: 'M16 16l4 4' }, 'tail'),
+        ],
+      });
+    }
+
     /** 千问办公状态卡片。 */
     function QwenWorkPluginCard(props) {
       const t = props.t;
-      const [open, setOpen] = react.useState(props.initialOpen === true);
+      // surface='settings'：宿主提供页面外壳，卡片不再自带折叠按钮，且始终展开。
+      const embedded = props.surface === 'settings';
+      const [open, setOpen] = react.useState(embedded || props.initialOpen === true);
       // `initialState` 仅供离屏渲染检查（tools/client-render-check.mjs）注入用；
       // DSH 运行时不会传该属性，行为与 useState(null) 完全一致。
       const [state, setState] = react.useState(props.initialState ?? null);
@@ -650,9 +724,9 @@ window.__ModuleLoader__.load({
         : t('subtitle');
 
       return react_jsx_runtime.jsxs('div', {
-        style: cardStyle,
+        style: embedded ? embeddedCardStyle : cardStyle,
         children: [
-          react_jsx_runtime.jsxs('button', {
+          embedded ? null : react_jsx_runtime.jsxs('button', {
             type: 'button',
             style: headerStyle,
             onClick: () => setOpen((value) => !value),
@@ -673,7 +747,7 @@ window.__ModuleLoader__.load({
           }),
           open
             ? react_jsx_runtime.jsxs('div', {
-                style: bodyStyle,
+                style: embedded ? embeddedBodyStyle : bodyStyle,
                 children: [
                   react_jsx_runtime.jsxs('div', {
                     style: {
@@ -867,6 +941,10 @@ window.__ModuleLoader__.load({
       creditsTotal: '合计：{total}',
       used: '已用',
       models: '可选模型',
+      catalogLive: '上游实时目录',
+      catalogStale: '上游拉取失败，显示上次成功的目录',
+      catalogFallback: '内置兜底目录（未登录或上游不可达）',
+      catalogUpdatedAt: '更新于 {time}',
       // 上游性能
       perfHeading: '上游速度',
       ttft: '首 token 延迟',
@@ -919,6 +997,10 @@ window.__ModuleLoader__.load({
       creditsTotal: 'Total: {total}',
       used: 'Used',
       models: 'Available models',
+      catalogLive: 'Live upstream catalog',
+      catalogStale: 'Upstream fetch failed; showing last successful catalog',
+      catalogFallback: 'Built-in fallback catalog (signed out or upstream unreachable)',
+      catalogUpdatedAt: 'updated {time}',
       perfHeading: 'Upstream speed',
       ttft: 'First token',
       speed: 'Output rate',
@@ -958,6 +1040,79 @@ window.__ModuleLoader__.load({
      * 0.1.2 的 slot 注册用 `key` / `priority`（rc.6→rc.7 曾把 `id`/`order`
      * 改名，此处以本机基线 0.1.2-rc.1 为准）。
      */
+    /**
+     * 注册设置页一级导航（与 WorkBuddy / Trae 同形态）。
+     *
+     * `settings.section` 提供页面本体，`settings.section.icon` 提供左侧导航
+     * 图标——只注前者会得到一行没图标的导航，所以两个都注；图标注册
+     * 失败不得连累页面。不做能力探测：`slots.inject` 本身就是探测。
+     *
+     * @param {any} ctx
+     * @param {Function} t 已绑定命名空间的文案函数
+     * @param {string} namespace
+     */
+    function registerSettingsSection(ctx, t, namespace) {
+      try {
+        ctx.slots.inject('settings.section', () => {
+          const disposers = [];
+          disposers.push(
+            ctx.slots.register(
+              {
+                name: 'settings.section',
+                id: QWENWORK_SETTINGS_SECTION_ID,
+                order: 36,
+                label: () => t('title'),
+                locale: namespace,
+                inject: () => ({ t, surface: 'settings' }),
+              },
+              QwenWorkPluginCard,
+            ),
+          );
+          try {
+            const iconInject = ctx.slots.inject('settings.section.icon', () => {
+              const iconDisposer = ctx.slots.register(
+                {
+                  name: 'settings.section.icon',
+                  id: QWENWORK_SETTINGS_SECTION_ID,
+                  locale: namespace,
+                },
+                (iconProps) =>
+                  react_jsx_runtime.jsx(QwenWorkNavIcon, {
+                    size: typeof iconProps?.size === 'number' ? iconProps.size : 16,
+                    style: {
+                      display: 'block',
+                      opacity: iconProps?.active === false ? 0.75 : 1,
+                    },
+                  }),
+              );
+              disposers.push(iconDisposer);
+              return iconDisposer;
+            });
+            if (typeof iconInject === 'function') disposers.push(iconInject);
+          } catch (error) {
+            console.error(
+              '[dsh-qwen-connect] settings nav icon failed to register (page unaffected):',
+              error,
+            );
+          }
+          return () => {
+            for (const dispose of disposers) {
+              try {
+                dispose();
+              } catch {
+                /* 单个席位释放失败不该阻止其余释放 */
+              }
+            }
+          };
+        });
+      } catch (error) {
+        console.error(
+          '[dsh-qwen-connect] settings section failed to register (plugin card unaffected):',
+          error,
+        );
+      }
+    }
+
     function apply(ctx) {
       try {
         const namespace = 'settings.qwenwork';
@@ -977,6 +1132,8 @@ window.__ModuleLoader__.load({
             QwenWorkPluginCard,
           ),
         );
+        // 设置页一级导航（页面 + 图标）。独立成函数，apply 只做调度。
+        registerSettingsSection(ctx, t, namespace);
         // 输入框工具栏的积分读数。注册本身无条件，渲染与否由 ComposerCredits
         // 内部的 provider gate 决定（见该组件注释），所以这里再包一层 try/catch
         // 兜住「插槽席位不存在/字段变更」——不能因为它挂了就连带卡片也不显示。

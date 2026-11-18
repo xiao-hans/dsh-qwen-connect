@@ -35,7 +35,22 @@
 | **token 统计**（上游 `raw_usage` → OpenAI `usage`） | ✅ |
 | **上游重试**（限流 / 网关瞬时故障，最多 3 次） | ✅ |
 | **请求方鉴别**（shim 共享密钥 + 常量时间比较） | ✅ |
-| 动态模型目录 | ❌ 静态内置（`/api/v2/model/list` 需签名） |
+| **动态模型目录**（签名 GET `/api/v2/model/list`，10 分钟缓存，失败保留上次结果） | ✅ |
+| **设置页一级导航卡片**（`settings.section` + 图标，与 WorkBuddy / Trae 同层） | ✅ |
+
+## 动态模型目录
+
+上游 `GET /algo/api/v2/model/list` 经 WASM 签名（`mode: 'auth'`）可直接取，
+返回按场景分组，千问办公用 `qwork` 那一组。插件启动时拉一次，之后每 10 分钟
+到期再拉；读模型列表与读卡片状态都会触发「到期才拉」的后台刷新。
+
+- **失败不清空**：保留上一次成功的真实目录并标 `stale`，卡片写明「显示上次成功的目录」；
+  从未拉成功过则用内置兜底表，卡片写明「内置兜底目录」。
+- **不编造数字**：`price_factor` 缺失就不显示倍率（填 0 会被渲染成「免费」）；
+  上下文窗口取 `context_config` 的默认档，**不是** `max_input_tokens`。
+- **促销如实透传**：`promotion.badge` 的原文（如「限时2折」）直接进选择器名与卡片徽章。
+
+静态兜底表仍保留在 `lib/models.js`，供离线 / 未登录时使用。
 
 ## 图片输入（视觉）
 
@@ -127,40 +142,38 @@ nickname: Test User   account: testuser01   remaining: 2100   tierName: Free
 
 ## 安装
 
-插件通过 Junction 挂载进 profile（源码改动即时生效，无需重新物化）：
+插件已发布到 npm，装进 DSH profile 即可（桌面版 profile 在 `%USERPROFILE%\.dsh\profiles\desktop`）：
 
 ```powershell
-$d = "E:\Codex开发\DHS开发\dsh-qwen-connect"
-$w = "$env:APPDATA\dsh-desktop\harness\profiles\web"
-$pkg = "@xiao-hans/dsh-qwen-connect"
-
-# 1) 依赖桥：让 CLI 侧自检可解析（运行时解析由 DSH 宿主接管，非必需）
-foreach ($ns in @("@deepseek-ai", "@earendil-works")) {
-  cmd /c mklink /J "$d\node_modules\$ns" `
-         "$env:APPDATA\dsh-desktop\harness\profiles\node_modules\$ns"
-}
-
-# 2) 挂进 profile（scoped 包：junction 放在 node_modules\@xiao-hans\ 下）
-New-Item -ItemType Directory -Force "$w\node_modules\@xiao-hans" | Out-Null
-cmd /c mklink /J "$w\node_modules\$pkg" "$d"
-
-# 3) 在 profile 的 package.json 里登记（三处，包名用 scoped 全名）
-#    dependencies:      "@xiao-hans/dsh-qwen-connect": "file:./node_modules/@xiao-hans/dsh-qwen-connect"
-#    dsh.profile.bundles: "@xiao-hans/dsh-qwen-connect"
-#    pnpm.overrides:    "@xiao-hans/dsh-qwen-connect": "link:./node_modules/@xiao-hans/dsh-qwen-connect"
+cd "$env:USERPROFILE\.dsh\profiles\desktop"
+pnpm add @xiao-hans/dsh-qwen-connect
 ```
 
-### 回滚
+装完确认 profile 的 `package.json` 里 `dsh.profile.bundles` 含 `@xiao-hans/dsh-qwen-connect`，
+然后**完全退出 DSH 再重启**（host 侧只在启动时加载插件）。
+
+### 卸载
 
 ```powershell
-$w = "$env:APPDATA\dsh-desktop\harness\profiles\web"
-cmd /c rmdir "$w\node_modules\@xiao-hans\dsh-qwen-connect"
-cmd /c rmdir "E:\Codex开发\DHS开发\dsh-qwen-connect\node_modules\@deepseek-ai"
-cmd /c rmdir "E:\Codex开发\DHS开发\dsh-qwen-connect\node_modules\@earendil-works"
-# 再用备份覆盖 profile 配置
-Copy-Item "$w\_backup-qwen-connect-20260911-141226\package.json" "$w\package.json" -Force
-Copy-Item "$w\_backup-qwen-connect-20260911-141226\cordis.patch.yml" "$w\cordis.patch.yml" -Force
+cd "$env:USERPROFILE\.dsh\profiles\desktop"
+pnpm remove @xiao-hans/dsh-qwen-connect
 ```
+
+并从 `dsh.profile.bundles` 移除同名条目，再重启 DSH。
+
+### 本地源码调试
+
+改 `lib/` 时不想每改一次就发一个版本，用 Junction 把源码挂进 profile（改动即时生效）：
+
+```powershell
+node tools/install-to-dsh.mjs --dry-run   # 先预览
+node tools/install-to-dsh.mjs             # 接线（自动备份 profile 配置）
+node tools/install-to-dsh.mjs --uninstall # 移除接线，不动源码
+```
+
+它做三件事：profile 的 `node_modules` 下建 Junction、在 profile `package.json` 登记三处
+（`dependencies` / `dsh.profile.bundles` / `pnpm.overrides`）、建依赖桥让插件能解析到宿主 peer 依赖。
+详见 `安装说明.md`。
 
 ## 流收尾语义（为什么回合不会「突然不动」）
 

@@ -49,7 +49,8 @@
 | `signer-shim.js` | 稳定的转发出口（**集成方只 import 这个**） | 外部集成方 |
 | `sse.js` | 健壮 SSE 解析 + OpenAI chunk 编码 | `chat-shim.js` |
 | `runtime-identity.js` | Cosy-Version / machineId 多级兜底（含注册表发现） | `signer-session.js`、`tools/check-upstream-contract.mjs` |
-| `models.js` | **静态**模型目录（来自 App 日志 rawModels） | `chat-shim.js`、`client.js` |
+| `models.js` | 模型目录的**生效状态**与字段映射（上游优先，静态表兜底） | `chat-shim.js`、`client.js`、`model-catalog.js` |
+| `model-catalog.js` | 签名拉取 `/api/v2/model/list` + 归一化 + TTL/退避刷新器（永不抛） | `index.js` |
 | `endpoint.js` / `rest.js` / `api.js` / `auth-api.js` / `auth.js` | 网关地址、HTTP 封装、状态与用量 API | 上层 |
 | `loopback.js` | loopback/Origin 判定 | `web-status.js`、`chat-shim.js` |
 | `stall-detector.js` / `stall-guard.js` | 「半途停止」判定与原位续跑守卫 | `chat-shim.js` |
@@ -58,7 +59,7 @@
 ## 4. 目录结构
 
 ```
-lib/              24 .js + README-credentials.md —— 发布主体，也是唯一「改了就得重新部署」的目录
+lib/              25 .js + README-credentials.md —— 发布主体，也是唯一「改了就得重新部署」的目录
 tools/            22 个 .mjs —— verify-all / check-upstream-contract / package-plugin /
                   install-to-dsh / detect-dsh / 各类 *-check.mjs 与 *-e2e-chat.mjs
 test/             web-status.test.mjs + unit/*.test.mjs(22) + tools/live-check.mjs
@@ -67,7 +68,7 @@ docs/             App升级后失效排查手册.md（升级排障主文档）·
 research/         wasm.bin + qoder-wasm-glue.mjs（随包发布）；probes-*/、buddy2api-probes/
                   ——历史探针与调研，**不参与测试**（见红线 6）
 dist/@xiao-hans/  package-plugin.mjs 生成的可分发目录 + zip ——构建产物
-一键安装.cmd / 一键卸载.cmd / 安装说明.md / INSTALL-新电脑.md / cordis.patch.yml
+安装说明.md / cordis.patch.yml
 ```
 
 ## 5. Skill 调度
@@ -130,13 +131,13 @@ node tools/package-plugin.mjs          # 重新生成 dist/（含 zip）
 
 ### 已知限制（不要当 bug 修，见 `docs/已知上游边界.md`）
 
-- 模型目录是**静态**的（`lib/models.js`：pro / flash / qwen3.8-max-preview），上游 `/api/v2/model/list` 需签名、裸调 403，所以无自动列表。
+- 模型目录已改为**动态**（`lib/model-catalog.js` 签名 GET `/api/v2/model/list`，`mode:'auth'`，取 `qwork` 场景）。裸调仍 403，必须走签名会话。静态表降为兜底；拉取失败保留上次成功目录并标 `stale`，**不清空**。上游字段两个陷阱：`max_input_tokens`（180000）不是上下文上限，看 `context_config` 默认档；`price_factor` 缺失不能填 0（会渲染成「免费」）。
 - `pro` 对高重复输入（`'测'.repeat(500)`）会 >60s 挂起，属上游行为；已用显式 `parameters.max_tokens=32000` + 流空闲超时兜住。复现脚本 `research/probes-2026-09-14/verify-max-tokens.mjs`。
 - `reasoning_effort='low'` 对 flash 无稳定效果（见 `research/buddy2api-probes/probe-flash-thinking.mjs`）。
 - 平台限制：macOS/Linux 不支持（DPAPI + `%APPDATA%`）；跨 Windows 用户必须重新登录；凭证不可拷贝。
 
 ### DoD
 
-改动算完成，当且仅当：① `node --check` 通过 ② 相关单测通过（`npm test`；win32 基线 246 pass / 5 fail，**须拆开报告**而不是笼统说「历史遗留」：4 个是 ERR_MODULE_NOT_FOUND（本机缺 `@earendil-works/pi-ai`、`@deepseek-ai/dsh-llm` 等宿主 peer 依赖），1 个是 `test/unit/file-credentials.test.mjs` 的 write-back-failure 用例——它用 `fs.chmodSync(dir, 0o555)` 造只读目录，而 Windows 的目录只读属性不阻止在其中建文件，该用例只在 Linux/macOS 成立，属测试的平台假设缺陷，**不要去改 `lib/credentials.js`**）③ `node tools/check-upstream-contract.mjs` 无参数运行 8/8 通过 ④ 已按 §7 部署链路同步 dist + profile 并提示重启 ⑤ 新学到的持久事实已写进 Basic Memory（`main/dsh-workspace/*`）⑥ `docs/` 与本文件若受影响则同步。
+改动算完成，当且仅当：① `node --check` 通过 ② 相关单测通过（`npm test`；win32 基线 267 pass / 5 fail，**须拆开报告**而不是笼统说「历史遗留」：4 个是 ERR_MODULE_NOT_FOUND（本机缺 `@earendil-works/pi-ai`、`@deepseek-ai/dsh-llm` 等宿主 peer 依赖），1 个是 `test/unit/file-credentials.test.mjs` 的 write-back-failure 用例——它用 `fs.chmodSync(dir, 0o555)` 造只读目录，而 Windows 的目录只读属性不阻止在其中建文件，该用例只在 Linux/macOS 成立，属测试的平台假设缺陷，**不要去改 `lib/credentials.js`**）③ `node tools/check-upstream-contract.mjs` 无参数运行 8/8 通过 ④ 已按 §7 部署链路同步 dist + profile 并提示重启 ⑤ 新学到的持久事实已写进 Basic Memory（`main/dsh-workspace/*`）⑥ `docs/` 与本文件若受影响则同步。
 
 **不许**为了让测试通过而放宽断言或删除测试；`test/unit/runtime-identity.test.mjs` 现有 21 例是升级兼容的回归网，改动 `runtime-identity.js` 必须保住它们。

@@ -34,7 +34,7 @@ check('拷贝完成', fs.existsSync(path.join(dest, 'lib', 'index.js')));
 check('WASM 随包', fs.existsSync(path.join(dest, 'research', 'wasm.bin')));
 check('glue 随包', fs.existsSync(path.join(dest, 'research', 'qoder-wasm-glue.mjs')));
 check('注入器随包', fs.existsSync(path.join(dest, 'tools', 'install-to-dsh.mjs')));
-check('安装文档随包', fs.existsSync(path.join(dest, 'INSTALL-新电脑.md')));
+check('安装文档随包', fs.existsSync(path.join(dest, '安装说明.md')));
 
 console.log('\n=== 2) 从新位置注入到假 profile ===');
 const profile = path.join(TMP, 'profiles', 'web');

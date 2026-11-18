@@ -23,10 +23,14 @@ import {
   FALLBACK_QWENWORK_MODELS,
   QWENWORK_PROVIDER,
   catalogForCard,
+  getActiveCatalog,
+  getCatalogMeta,
   toPiModel,
 } from './models.js';
+import { createCatalogRefresher } from './model-catalog.js';
 import {
   getAccountContext,
+  getValidCredential,
   isWired,
 } from './credentials-seam.js';
 import { registerQwenWorkStatusRoute } from './web-status.js';
@@ -127,8 +131,25 @@ function imageDepsFrom(ctx) {
 }
 
 /**
- * 组装 provider。`getModels` 每次读取都重建列表，因此后续接入动态目录时
- * 无需重建 provider 实例。
+ * 目录刷新器单例。
+ *
+ * 惰性创建：模块加载期不去碰凭据（未登录时 getValidCredential 会抛，
+ * 而 apply() 永远不得抛）。凭据每次拉取现取，因此登录态变化无需重建。
+ */
+let catalogRefresher = null;
+function getCatalogRefresher(logger) {
+  if (catalogRefresher === null) {
+    catalogRefresher = createCatalogRefresher({
+      getCredential: getValidCredential,
+      ...(logger === undefined ? {} : { logger }),
+    });
+  }
+  return catalogRefresher;
+}
+
+/**
+ * 组装 provider。`getModels` 每次读取都重建列表，因此动态目录刷新后
+ * 无需重建 provider 实例，下一次读选择器就能看到新模型。
  *
  * @param {() => string} getBaseUrl 返回当前 shim 的 baseUrl
  * @param {() => (string | null) | Promise<string | null>} getSharedSecret
@@ -144,10 +165,18 @@ function createQwenWorkAdapter(getBaseUrl, getSharedSecret, image = {}) {
   // `resolveAttachments`，声明 image 才是真的能用；否则声明了也会在
   // 发图时抛错。两者必须同步，这是本项目反复出现的「声明与实现一致」原则。
   const imagesAvailable = typeof image.resolveAttachments === 'function';
-  const buildModels = () =>
-    FALLBACK_QWENWORK_MODELS.map((info) =>
+  const buildModels = () => {
+    // 读目录顺手触发一次「到期才拉」的后台刷新：宿主侧 getModels 是同步的，
+    // 不能 await；本次返回当前生效目录，下次读取自然拿到新值。
+    try {
+      getCatalogRefresher().ensureFresh();
+    } catch {
+      /* 刷新器不可用不影响目录返回 */
+    }
+    return getActiveCatalog().map((info) =>
       toPiModel(info, getBaseUrl(), { supportsImages: imagesAvailable }),
     );
+  };
 
   const provider = {
     ...createProvider({
@@ -344,6 +373,12 @@ export function apply(ctx, config) {
       getAccountContext,
       tokenAvailable: isWired,
       models: catalogForCard,
+      // 目录来源元信息：卡片据此如实标注「上游实时 / 静态兜底 / 已过期」。
+      // 读状态也是一次合理的刷新时机（卡片展开即拉取）。
+      catalog: () => {
+        getCatalogRefresher(ctx.logger).ensureFresh();
+        return getCatalogMeta();
+      },
       // 上游实测性能（首 token 延迟 / 输出速率）——由 shim 采样累积。
       perf: perfSummary,
       provider: QWENWORK_PROVIDER,
@@ -369,6 +404,16 @@ export function apply(ctx, config) {
     installStallGuard(ctx, { logger: ctx.logger });
   } catch (error) {
     ctx.logger?.warn?.('dsh-qwen-connect: stall-guard installation failed', error);
+  }
+
+  // ---- 动态模型目录预热 ----------------------------------------------
+  // 拉一次上游目录，让选择器首次展开就是真实在售模型。refresh() 内部
+  // 已兜住所有异常（失败只标脏并保留静态兜底），这里再包一层 try/catch
+  // 兜住「刷新器构造本身失败」——apply() 永不抛是红线。
+  try {
+    void getCatalogRefresher(ctx.logger).refresh();
+  } catch (error) {
+    ctx.logger?.warn?.('dsh-qwen-connect: model catalog warm-up skipped', error);
   }
 
   // ---- provider 注册 --------------------------------------------------
