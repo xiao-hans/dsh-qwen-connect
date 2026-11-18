@@ -3,7 +3,7 @@
 // 用 react-dom/server 做 SSR 渲染 —— 能真正执行组件代码而不需要浏览器 DOM。
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -71,9 +71,10 @@ function fakeRequire(id) {
 
 // ---- 加载 client.js ----
 const clientPath = path.join(PLUGIN_ROOT, 'lib', 'client.js');
-const src = fs.readFileSync(clientPath, 'utf8');
-// client.js 是自执行包装，直接 eval 即可（它会调用 window.__ModuleLoader__.load）
-new Function('window', 'require', src)(globalThis.window, fakeRequire);
+// client.js 是浏览器侧的自执行包装：顶层只调 window.__ModuleLoader__.load，
+// 没有 import/export，所以能直接当模块加载（window 已挂在 globalThis 上）。
+// factory 的 require 是入参，由下面调用时传入，因此不需要动态求值。
+await import(pathToFileURL(clientPath).href);
 
 if (registered === null) {
   console.error('❌ client.js 未调用 __ModuleLoader__.load');
