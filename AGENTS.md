@@ -33,7 +33,7 @@
 
 - 语言：Node.js ESM（`"type": "module"`），`engines.node: ^22.19.0 || >=24.0.0`。零 TypeScript、零打包器，`lib/*.js` 直接就是发布产物。
 - 唯一的非 JS 二进制资产：`research/wasm.bin`（297,238 B，签名 WASM，**随包发布**，与本机安装的 App 版本解耦）+ `research/qoder-wasm-glue.mjs`。默认路径在 `lib/signer-session.js` 的 `DEFAULT_WASM_BIN` / `DEFAULT_GLUE`。
-- 前端注入：`package.json` 的 `dsh.client.inject` = `@deepseek-ai/dsh-client-ui-renderer` / `-settings-plugins` / `-locale`，`dsh.client.platform: web`；`dsh.bundle.patch: ./cordis.patch.yml`。
+- 前端注入：`package.json` 的 `dsh.client.inject` = `@deepseek-ai/dsh-client-ui-renderer` / `-ui-primitives` / `-ui-settings` / `-ui-slots` / `-settings-plugins` / `-locale`，`dsh.client.platform: web`；`dsh.bundle.patch: ./cordis.patch.yml`。导航图标取 primitives 的 `IconLinkOutlineMedium`（与宿主 `navIcon(id)` 同族），取不到时退回本地描边图形。
 
 `lib/`（24 个 .js + `README-credentials.md`）的分层与调用方向：
 

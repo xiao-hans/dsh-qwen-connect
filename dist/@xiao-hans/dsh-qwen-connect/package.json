@@ -1,7 +1,7 @@
 {
   "name": "@xiao-hans/dsh-qwen-connect",
   "displayName": "DSH Qwen Work Connect",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "description": "DSH 插件：复用 QwenWorkCN（千问办公）桌面 App 登录态，零配置接入 DSH",
   "main": "lib/index.js",
@@ -58,6 +58,7 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-primitives",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-settings-plugins",

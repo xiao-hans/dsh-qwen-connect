@@ -37,6 +37,7 @@
 | **请求方鉴别**（shim 共享密钥 + 常量时间比较） | ✅ |
 | **动态模型目录**（签名 GET `/api/v2/model/list`，10 分钟缓存，失败保留上次结果） | ✅ |
 | **设置页一级导航卡片**（`settings.section` + 图标，与 WorkBuddy / Trae 同层） | ✅ |
+| 导航图标用宿主同族图标（primitives 的 `Icon*OutlineMedium`） | ✅ |
 
 ## 动态模型目录
 

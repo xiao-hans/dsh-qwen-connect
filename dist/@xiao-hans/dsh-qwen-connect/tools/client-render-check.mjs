@@ -476,7 +476,7 @@ sectionCase(
   ['上游实时目录', '内置兜底目录'],
 );
 
-// 导航图标：单色 SVG，随尺寸缩放，非活跃态降透明度
+// 导航图标：优先用宿主 primitives 同族图标，取不到时退回单色描边 SVG；随尺寸缩放
 try {
   const icon = slotsRegistered.find((s) => s.meta.name === 'settings.section.icon');
   const activeHtml = server.renderToStaticMarkup(react.createElement(icon.Component, { size: 16 }));
@@ -486,14 +486,55 @@ try {
   if (!activeHtml.includes('<svg') || !activeHtml.includes('currentColor')) {
     console.log('  ❌ 导航图标不是单色 SVG');
     failures++;
-  } else if (!idleHtml.includes('width="20"') || !idleHtml.includes('0.75')) {
-    console.log('  ❌ 导航图标未响应 size / active');
+  } else if (!idleHtml.includes('width="20"')) {
+    console.log('  ❌ 导航图标未响应 size');
     failures++;
   } else {
-    console.log('  ✅ 导航图标：单色 SVG、随尺寸与活跃态变化');
+    console.log('  ✅ 导航图标：单色 SVG、随尺寸缩放');
   }
 } catch (e) {
   console.log(`  ❌ 导航图标渲染抛异常: ${e.message}`);
+  failures++;
+}
+
+// 宿主提供了 primitives 时，导航图标必须走宿主同族组件（而不是自绘兜底）。
+// 上面的 fakeRequire 对 primitives 抛错，走的是兜底分支；factory 把 require 作为
+// 入参，所以换一个 require 重新执行同一个 factory 就能覆盖宿主分支。
+try {
+  const stubGlyph = (p) =>
+    react.createElement('svg', { width: p.size, height: p.size, 'data-host-icon': 'link' });
+  const hostRequire = (id) => {
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') {
+      return { IconLinkOutlineMedium: stubGlyph };
+    }
+    return fakeRequire(id);
+  };
+  const hostSlots = [];
+  const hostCtx = {
+    ...ctx,
+    slots: {
+      inject: (_slot, fn) => {
+        fn();
+      },
+      register: (meta, Component) => {
+        hostSlots.push({ meta, Component });
+        return () => {};
+      },
+    },
+  };
+  registered.factory(hostRequire).apply(hostCtx);
+  const hostIcon = hostSlots.find((s) => s.meta.name === 'settings.section.icon');
+  const hostHtml = server.renderToStaticMarkup(
+    react.createElement(hostIcon.Component, { size: 16 }),
+  );
+  if (!hostHtml.includes('data-host-icon="link"')) {
+    console.log('  ❌ 宿主有 primitives 时图标没走宿主组件');
+    failures++;
+  } else {
+    console.log('  ✅ 导航图标：宿主有 primitives 时用 IconLinkOutlineMedium 同族组件');
+  }
+} catch (e) {
+  console.log(`  ❌ 宿主图标分支检查抛异常: ${e.message}`);
   failures++;
 }
 
