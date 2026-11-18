@@ -28,6 +28,12 @@ function buildBody(text, variant, modelKey) {
   } else if (variant === 'off-enable-thinking') {
     mc.is_reasoning = false; innerMc.is_reasoning = false;
     parameters.enable_thinking = false;
+  } else if (variant === 'low-effort') {
+    // hermes llmThinkingOverride="low" 走到 pi-ai openai 路径会发的字段。
+    // 2026-11-08 两轮实测：reasoning_effort='low' 对思考量无稳定影响
+    // （134~262 字符波动，与 baseline 同分布），上游同样无视该字段。
+    mc.is_reasoning = true; innerMc.is_reasoning = true;
+    parameters.reasoning_effort = 'low';
   }
   return JSON.stringify({
     request_id: rid,
@@ -97,7 +103,7 @@ async function run(variant, modelKey) {
 }
 
 for (const modelKey of ['flash']) {
-  for (const variant of ['baseline', 'off-sdk-style', 'off-enable-thinking']) {
+  for (const variant of ['baseline', 'off-sdk-style', 'off-enable-thinking', 'low-effort']) {
     const r = await run(variant, modelKey);
     if (r.err) console.log(`${modelKey} ${r.variant}: ❌ ${r.err}`);
     else console.log(`${modelKey} ${r.variant}: ${((r.ms)/1000).toFixed(1)}s | 正文${r.content} 思考${r.reasoning}${r.code?' | '+r.code:''} | ${JSON.stringify(r.head)}`);
