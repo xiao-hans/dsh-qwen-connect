@@ -15,9 +15,12 @@ const { apply, QWENWORK_PROVIDER, QWENWORK_SETTINGS_NS } = await import('../lib/
 
 /** 造一个记录调用的假 cordis ctx。 */
 function makeCtx() {
-  const calls = { adapters: [], directories: [], routes: [], effects: [], settings: [] };
+  const calls = { adapters: [], directories: [], routes: [], effects: [], settings: [], emits: [] };
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
+    emit(event) {
+      calls.emits.push(event);
+    },
     effect(fn, label) {
       calls.effects.push(label ?? '(anonymous)');
       const dispose = fn();

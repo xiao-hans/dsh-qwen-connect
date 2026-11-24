@@ -10,5 +10,11 @@
 /** 本插件拥有的状态端点，供其浏览器半读取。 */
 export const QWENWORK_STATUS_PATH = '/plugins/dsh-qwen-connect/status';
 
+/**
+ * 模型偏好（开关 / 默认项）的写回端点。与状态端点同为环回-only，
+ * 见 lib/web-status.js 的安全边界。
+ */
+export const QWENWORK_SETTINGS_PATH = '/plugins/dsh-qwen-connect/settings';
+
 /** 卡片向 host 拉取状态的轮询间隔。 */
 export const QWENWORK_STATUS_POLL_MS = 60_000;

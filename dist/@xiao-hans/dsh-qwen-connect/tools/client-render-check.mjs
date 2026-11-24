@@ -477,6 +477,29 @@ sectionCase(
   ['上游实时目录', '内置兜底目录'],
 );
 
+// 模型开关：host 给 enabled=false 时必须显示为停用（删除线 + 启用按钮），
+// 且停用项不得带「默认」徽章（默认必须落在启用项上，否则选择器会指着一个不可用模型）。
+sectionCase(
+  '模型停用态：删除线与启用按钮',
+  {
+    ...sectionState,
+    models: [
+      { id: 'pro', name: '高级', rate: 1, isDefault: false },
+      { id: 'flash', name: '标准', rate: 0.1, enabled: false },
+    ],
+  },
+  ['line-through', '启用', '设为默认'],
+  // 断言的是「默认」**徽章节点**，不是按钮文案「设为默认」——后者天然含这两个字。
+  ['>默认<'],
+);
+// enabled 字段缺失（旧 host / 状态接口降级）按启用处理：不能因此隐藏操作按钮。
+sectionCase(
+  '模型无 enabled 字段：按启用渲染',
+  { ...sectionState, models: [{ id: 'pro', name: '高级', rate: 1, isDefault: true }] },
+  ['设为默认', '停用'],
+  ['line-through'],
+);
+
 // 导航图标：优先用宿主 primitives 同族图标，取不到时退回单色描边 SVG；随尺寸缩放
 try {
   const icon = slotsRegistered.find((s) => s.meta.name === 'settings.section.icon');

@@ -1,7 +1,7 @@
 {
   "name": "@xiao-hans/dsh-qwen-connect",
   "displayName": "DSH Qwen Work Connect",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "type": "module",
   "description": "DSH 插件：复用 QwenWorkCN（千问办公）桌面 App 登录态，零配置接入 DSH",
   "main": "lib/index.js",
@@ -72,8 +72,6 @@
     "@deepseek-ai/dsh-host-webserver": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-settings": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
-    "@deepseek-ai/schemastery": "^3.18.2 || ^4.0.0-0",
     "@earendil-works/pi-ai": ">=0.84.4 <0.86.0 || >=1.0.0-0",
     "react": "^18.2.0"
   },

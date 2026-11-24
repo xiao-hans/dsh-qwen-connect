@@ -23,6 +23,8 @@ window.__ModuleLoader__.load({
     //#region status-paths.ts
     /** 与 lib/status-paths.js 保持一致（client 半无法 import host 模块）。 */
     const QWENWORK_STATUS_PATH = '/plugins/dsh-qwen-connect/status';
+    /** 与 lib/status-paths.js 的 QWENWORK_SETTINGS_PATH 保持一致：模型偏好写回。 */
+    const QWENWORK_SETTINGS_PATH = '/plugins/dsh-qwen-connect/settings';
     /** 与 lib/models.js 的 QWENWORK_PROVIDER 保持一致（同样无法 import host）。 */
     const QWENWORK_PROVIDER = 'qwenwork';
     /** 设置页一级导航的席位 id（页面与图标共用同一个）。 */
@@ -197,6 +199,19 @@ window.__ModuleLoader__.load({
       fontSize: 13,
       cursor: 'pointer',
     };
+    /** 模型行上的小操作按钮（停用/启用/设为默认）——比刷新按钮更轻一级。 */
+    const modelActionStyle = {
+      flex: '0 0 auto',
+      border: '1px solid var(--dsw-alias-border-l2)',
+      borderRadius: 6,
+      padding: '1px 8px',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-tertiary)',
+      font: 'inherit',
+      fontSize: 12,
+      lineHeight: '18px',
+      cursor: 'pointer',
+    };
     /** 千分位格式化（积分 / 请求数等）。 */
     function formatNumber(value) {
       if (typeof value !== 'number' || !Number.isFinite(value)) return String(value ?? '');
@@ -346,6 +361,9 @@ window.__ModuleLoader__.load({
       if (typeof model.promotionLabel === 'string' && model.promotionLabel !== '') {
         badges.push(model.promotionLabel);
       }
+      // host 没带 enabled 字段（旧 host / 状态接口降级）时按启用处理，
+      // 不因此隐藏操作——宁可给可点的按钮，也不显示错的状态。
+      const enabled = model.enabled !== false;
 
       return react_jsx_runtime.jsxs(
         'div',
@@ -358,16 +376,44 @@ window.__ModuleLoader__.load({
                 style: modelRowStyle,
                 children: [
                   react_jsx_runtime.jsx('span', {
-                    style: { color: 'var(--dsw-alias-label-secondary)' },
+                    style: {
+                      color: enabled
+                        ? 'var(--dsw-alias-label-secondary)'
+                        : 'var(--dsw-alias-label-quaternary, var(--dsw-alias-label-tertiary))',
+                      textDecoration: enabled ? 'none' : 'line-through',
+                    },
                     children: model.name,
                   }),
-                  react_jsx_runtime.jsx('span', {
-                    style: {
-                      ...valueStyle,
-                      color: 'var(--dsw-alias-label-tertiary)',
-                      fontSize: 12,
-                    },
-                    children: model.rate === undefined ? '' : `${model.rate}x`,
+                  react_jsx_runtime.jsxs('span', {
+                    style: { display: 'inline-flex', alignItems: 'baseline', gap: 10 },
+                    children: [
+                      react_jsx_runtime.jsx('span', {
+                        style: {
+                          ...valueStyle,
+                          color: 'var(--dsw-alias-label-tertiary)',
+                          fontSize: 12,
+                        },
+                        children: model.rate === undefined ? '' : `${model.rate}x`,
+                      }),
+                      props.onToggle === undefined
+                        ? null
+                        : react_jsx_runtime.jsx('button', {
+                            type: 'button',
+                            style: modelActionStyle,
+                            disabled: props.busy === true,
+                            onClick: () => props.onToggle(model.id, !enabled),
+                            children: enabled ? t('disable') : t('enable'),
+                          }),
+                      props.onToggle === undefined || !enabled
+                        ? null
+                        : react_jsx_runtime.jsx('button', {
+                            type: 'button',
+                            style: modelActionStyle,
+                            disabled: props.busy === true || model.isDefault === true,
+                            onClick: () => props.onSetDefault(model.id),
+                            children: t('setDefault'),
+                          }),
+                    ],
                   }),
                 ],
               },
@@ -598,7 +644,13 @@ window.__ModuleLoader__.load({
                   .map((model, index) =>
                     react_jsx_runtime.jsx(
                       ModelRow,
-                      { model, t },
+                      {
+                        model,
+                        t,
+                        busy: props.busy,
+                        onToggle: props.onToggle,
+                        onSetDefault: props.onSetDefault,
+                      },
                       `model-${typeof model.id === 'string' && model.id !== '' ? model.id : index}`,
                     ),
                   ),
@@ -701,6 +753,67 @@ window.__ModuleLoader__.load({
       const [state, setState] = react.useState(props.initialState ?? null);
       const [busy, setBusy] = react.useState(false);
       const [nonce, setNonce] = react.useState(0);
+      // 偏好写回失败的一次性提示；下一次成功写入或重新展开即清除。
+      const [saveError, setSaveError] = react.useState(null);
+
+      /**
+       * 把偏好写到宿主（loopback POST），成功后立刻重读状态。
+       *
+       * 为什么用「重读」而不是本地乐观更新：生效判定（哪个模型是默认、哪些被
+       * 关掉）由 host 的目录 + 偏好共同算出，卡片自己算一份就会有第二套真相。
+       * host 侧写盘 + setActiveCatalog 偏好是同步完成的，所以紧随的 GET 一定读到新值。
+       *
+       * @param {object} patch { disabledModels?: string[] } | { defaultModel?: string|null }
+       */
+      async function save(patch) {
+        setBusy(true);
+        setSaveError(null);
+        try {
+          const response = await fetch(QWENWORK_SETTINGS_PATH, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(patch),
+          });
+          const body = await response.json().catch(() => null);
+          if (!response.ok || body?.ok !== true) {
+            throw new Error(body?.error ?? `HTTP ${response.status}`);
+          }
+          if (body.persisted === false) setSaveError(t('saveUnpersisted'));
+          setNonce((value) => value + 1);
+        } catch (error) {
+          setSaveError(t('saveFailed', {
+            message: error instanceof Error ? error.message : String(error),
+          }));
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      /**
+       * 停用/启用某个模型：提交**完整**的停用列表（不是增量）。
+       *
+       * 增量的话，卡片与 host 之间要各持一半状态，并发点两次就会互相覆盖；
+       * 全量列表是无副作用的纯函数结果，重复提交也幂等。
+       */
+      function toggleModel(modelId, enabled) {
+        const models = Array.isArray(state?.models) ? state.models : [];
+        const disabled = new Set(
+          models.filter((model) => model?.enabled === false).map((model) => model.id),
+        );
+        if (enabled) disabled.delete(modelId);
+        else disabled.add(modelId);
+        void save({ disabledModels: [...disabled] });
+      }
+
+      /**
+       * 设为默认。关掉当前默认项时顺带把新默认交给 host：
+       * host 的 effectiveDefaultKey 会自动回落到首个启用模型，
+       * 卡片不自己猜——那才是唯一真相。
+       */
+      function setDefaultModel(modelId) {
+        void save({ defaultModel: modelId });
+      }
 
       react.useEffect(() => {
         let cancelled = false;
@@ -797,7 +910,27 @@ window.__ModuleLoader__.load({
                       }),
                     ],
                   }),
-                  react_jsx_runtime.jsx(StatusBody, { state, t }),
+                  saveError === null
+                    ? null
+                    : react_jsx_runtime.jsx(
+                        'div',
+                        {
+                          style: {
+                            fontSize: 12,
+                            lineHeight: '18px',
+                            color: 'var(--dsw-alias-state-warning-primary, #b7791f)',
+                          },
+                          children: saveError,
+                        },
+                        'save-error',
+                      ),
+                  react_jsx_runtime.jsx(StatusBody, {
+                    state,
+                    t,
+                    busy,
+                    onToggle: toggleModel,
+                    onSetDefault: setDefaultModel,
+                  }),
                 ],
               })
             : null,
@@ -997,6 +1130,12 @@ window.__ModuleLoader__.load({
       badgeDefault: '默认',
       badgeRecommended: '推荐',
       badgeNew: '新',
+      // 模型开关 / 设为默认
+      setDefault: '设为默认',
+      disable: '停用',
+      enable: '启用',
+      saveFailed: '保存失败：{message}',
+      saveUnpersisted: '已生效，但未能写入磁盘（重启后可能丢失）',
       // 输入框工具栏积分读数
       creditsUnavailable: '未登录',
       creditsDegraded: '积分暂不可用',
@@ -1047,6 +1186,12 @@ window.__ModuleLoader__.load({
       badgeDefault: 'Default',
       badgeRecommended: 'Recommended',
       badgeNew: 'New',
+      // 模型开关 / 设为默认
+      setDefault: 'Set default',
+      disable: 'Disable',
+      enable: 'Enable',
+      saveFailed: 'Save failed: {message}',
+      saveUnpersisted: 'Applied in this session, but could not be written to disk',
       // 输入框工具栏积分读数
       creditsUnavailable: 'Signed out',
       creditsDegraded: 'Quota unavailable',

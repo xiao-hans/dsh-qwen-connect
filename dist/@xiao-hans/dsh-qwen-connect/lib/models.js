@@ -184,6 +184,103 @@ export function resetCatalog() {
   catalogMeta = { source: 'fallback', fetchedAt: null, stale: false, error: null };
 }
 
+// ---------------------------------------------------------------------------
+// 用户偏好（开关与默认项）——持久化由 index.js 的设置存储接缝负责
+// ---------------------------------------------------------------------------
+
+/**
+ * 生效的模型偏好。
+ *
+ * 为什么状态放这里而不是 index.js：`toPiModel`（选择器）、`catalogForCard`
+ * （卡片）、`buildModels`（provider）三个消费点都只 import models.js，
+ * 偏好放在它们共同的下游才能一次生效、不会出现「卡片灰了但选择器还在」。
+ * 与 `activeCatalog` 同构：写入方唯一（`setModelPreferences`），读取方只读。
+ *
+ * ⚠️ disabled 与 defaultModel 存的是**归一化后的上游短 key**（`normalizeModelKey`
+ * 的结果，如 `flash`），不是宿主展示 id。上游目录每次刷新都会重建条目对象，
+ * 只有 key 是跨刷新稳定的标识——存 id 会让偏好在下一次拉取后静默失效。
+ *
+ * @type {{ disabled: Set<string>, defaultModel: string | null }}
+ */
+let modelPrefs = { disabled: new Set(), defaultModel: null };
+
+/**
+ * 写入用户偏好。字段缺省表示「不动」。
+ *
+ * @param {{ disabled?: Iterable<string>, defaultModel?: string | null }} prefs
+ *        `defaultModel` 传 `null` 表示清除用户选择，退回上游/静态目录的默认项。
+ */
+export function setModelPreferences(prefs = {}) {
+  if (Array.isArray(prefs.disabled) || prefs.disabled instanceof Set) {
+    modelPrefs = {
+      ...modelPrefs,
+      disabled: new Set(Array.from(prefs.disabled, (key) => String(key))),
+    };
+  }
+  if ('defaultModel' in prefs) {
+    const value = prefs.defaultModel;
+    modelPrefs = {
+      ...modelPrefs,
+      defaultModel: typeof value === 'string' && value !== '' ? value : null,
+    };
+  }
+  return { disabled: [...modelPrefs.disabled], defaultModel: modelPrefs.defaultModel };
+}
+
+/** 清空偏好（测试与卸载用，与 resetCatalog() 同惯例）。 */
+export function resetModelPreferences() {
+  modelPrefs = { disabled: new Set(), defaultModel: null };
+}
+
+/** 该模型是否被用户开启。目录刷新后不在目录里的旧禁用项自然失效，无需清理。 */
+export function isModelEnabled(info) {
+  return info !== null && info !== undefined && !modelPrefs.disabled.has(info.id);
+}
+
+/**
+ * 按用户偏好过滤后的目录：剔除关闭项，并把 `isDefault` 重写成生效默认。
+ *
+ * 给 provider 的 `getModels()` 用——选择器只能看到启用的模型，且「默认」标记
+ * 与卡片一致。条目按需浅拷贝，**绝不改原对象**：activeCatalog 同时被卡片
+ * （含关闭项）与 chat-shim 读取，原地改写会让状态互相污染。
+ *
+ * @returns {Array<object>}
+ */
+export function preferredCatalog() {
+  const effective = effectiveDefaultKey();
+  return getActiveCatalog()
+    .filter((model) => isModelEnabled(model))
+    .map((model) => {
+      const shouldDefault = model.id === effective;
+      return (model.isDefault === true) === shouldDefault
+        ? model
+        : { ...model, isDefault: shouldDefault };
+    });
+}
+
+/**
+ * 当前生效的默认模型 key。
+ *
+ * 优先级：用户选定 → 上游/静态目录里标了 isDefault 的 → 第一个**启用的** →
+ * 第一个。用户选项若已被关掉或已从上游下架，必须回落——否则宿主会拿着一个
+ * 不在选择器里的模型发请求。
+ *
+ * @returns {string | null}
+ */
+export function effectiveDefaultKey() {
+  const candidates = getActiveCatalog();
+  if (modelPrefs.defaultModel !== null) {
+    const picked = candidates.find(
+      (m) => m.id === modelPrefs.defaultModel || m.displayNameId === modelPrefs.defaultModel,
+    );
+    if (picked !== undefined && isModelEnabled(picked)) return picked.id;
+  }
+  const declared = candidates.find((m) => m.isDefault === true && isModelEnabled(m));
+  if (declared !== undefined) return declared.id;
+  const firstEnabled = candidates.find((m) => isModelEnabled(m));
+  return (firstEnabled ?? candidates[0])?.id ?? null;
+}
+
 /**
  * 按宿主 id / 展示 id / 上游 key 查目录条目（先查生效目录，再查静态回退）。
  *
@@ -277,13 +374,18 @@ function describeModel(info) {
 
 /** 供卡片展示的精简模型行。 */
 export function catalogForCard() {
+  // 默认徽章按**生效默认**打（用户选 > 上游标 > 首个启用），不是目录原始
+  // isDefault——用户在卡片上改默认后，卡片必须显示改后的值。
+  const effective = effectiveDefaultKey();
   return getActiveCatalog().map((model) => ({
     id: model.id,
     // 卡片显示短名（倍率已单独成列），选择器则用带倍率的长名。
     name: model.shortName ?? model.id,
     description: describeModel(model),
     rate: model.billingRate,
-    ...(model.isDefault === true ? { isDefault: true } : {}),
+    // 被关掉的模型仍在列表里（卡片要能重新打开它），只标注状态。
+    enabled: isModelEnabled(model),
+    ...(model.id === effective ? { isDefault: true } : {}),
     ...(model.isRecommended === true ? { isRecommended: true } : {}),
     ...(model.isNew === true ? { isNew: true } : {}),
     ...(typeof model.promotionLabel === 'string' && model.promotionLabel !== ''

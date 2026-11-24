@@ -323,3 +323,65 @@ test('createCatalogRefresher：并发 refresh 去重，只打一次上游', asyn
   assert.equal(fetches, 1);
   resetCatalog();
 });
+
+// ---- onCatalogChanged：目录变更通知（选择器刷新链路的触发端） ----
+
+test('createCatalogChanged：目录写入成功才通知，一次 refresh 只通知一次', async () => {
+  resetCatalog();
+  let notices = 0;
+  const refresher = createCatalogRefresher({
+    getCredential: async () => ({ token: 't' }),
+    endpoint: 'https://example.invalid',
+    signerFactory: fakeSigner([]),
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => REAL_PAYLOAD }),
+    onCatalogChanged: () => {
+      notices += 1;
+    },
+  });
+  await refresher.refresh();
+  assert.equal(notices, 1, '写入成功后必须通知宿主');
+  assert.equal(getCatalogMeta().source, 'upstream');
+  resetCatalog();
+});
+
+test('createCatalogChanged：拉取失败不通知（目录没变，宿主无需重读）', async () => {
+  resetCatalog();
+  setActiveCatalog(normalizeCatalog(REAL_PAYLOAD));
+  let notices = 0;
+  const refresher = createCatalogRefresher({
+    getCredential: async () => ({ token: 't' }),
+    endpoint: 'https://example.invalid',
+    signerFactory: fakeSigner([]),
+    fetchImpl: async () => {
+      throw new Error('socket hang up');
+    },
+    onCatalogChanged: () => {
+      notices += 1;
+    },
+    logger: { warn() {} },
+  });
+  const meta = await refresher.refresh();
+  assert.equal(meta.stale, true);
+  assert.equal(notices, 0, '失败路径不得通知');
+  resetCatalog();
+});
+
+test('createCatalogChanged：通知回调抛异常被吞掉，refresh 结果不受污染', async () => {
+  resetCatalog();
+  const warnings = [];
+  const refresher = createCatalogRefresher({
+    getCredential: async () => ({ token: 't' }),
+    endpoint: 'https://example.invalid',
+    signerFactory: fakeSigner([]),
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => REAL_PAYLOAD }),
+    onCatalogChanged: () => {
+      throw new Error('emit blew up');
+    },
+    logger: { warn: (...args) => warnings.push(args), info() {} },
+  });
+  const meta = await refresher.refresh();
+  assert.equal(meta.source, 'upstream', '目录仍应视为已更新');
+  assert.equal(meta.stale, false);
+  assert.equal(warnings.length, 1, '通知失败要留下可见痕迹');
+  resetCatalog();
+});

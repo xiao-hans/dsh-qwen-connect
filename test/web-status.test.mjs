@@ -15,7 +15,7 @@ import { createServer, request as httpRequest } from 'node:http';
  * 不能用 fetch：Host 是 fetch 的「禁止修改 header」，手工传入会被静默丢弃，
  * 于是永远测不到 Host 校验这一层。
  */
-function rawRequest(port, { method = 'GET', path = '/', headers = {} } = {}) {
+function rawRequest(port, { method = 'GET', path = '/', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const req = httpRequest({ host: '127.0.0.1', port, method, path, headers }, (res) => {
       const chunks = [];
@@ -29,17 +29,18 @@ function rawRequest(port, { method = 'GET', path = '/', headers = {} } = {}) {
       );
     });
     req.on('error', reject);
-    req.end();
+    req.end(body);
   });
 }
 
 import {
   qwenWorkStatusHandler,
+  qwenWorkSettingsHandler,
   qwenWorkWebStatus,
   registerQwenWorkStatusRoute,
   safeMessage,
 } from '../lib/web-status.js';
-import { QWENWORK_STATUS_PATH } from '../lib/status-paths.js';
+import { QWENWORK_STATUS_PATH, QWENWORK_SETTINGS_PATH } from '../lib/status-paths.js';
 import { hostIsLoopback, originIsLoopback } from '../lib/loopback.js';
 
 /** 路由挂载测试用的最小依赖集。 */
@@ -418,4 +419,151 @@ test('registerQwenWorkStatusRoute：连 webServer 都没有时不抛异常', () 
   assert.doesNotThrow(() => {
     registerQwenWorkStatusRoute({}, makeDeps());
   }, 'host provider 不能因卡片路由不可用而失败');
+});
+
+// ---------------------------------------------------------- 模型偏好写回
+
+const SETTINGS_HEADERS = {
+  host: '127.0.0.1',
+  origin: 'http://127.0.0.1',
+  'content-type': 'application/json',
+};
+
+function makeSettingsDeps(received = []) {
+  return {
+    setPreferences(patch) {
+      received.push(structuredClone(patch));
+      return { persisted: true, disabled: patch.disabledModels ?? [], defaultModel: null };
+    },
+  };
+}
+
+async function postSettings(port, body, headers = SETTINGS_HEADERS) {
+  return rawRequest(port, {
+    method: 'POST',
+    path: QWENWORK_SETTINGS_PATH,
+    headers,
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+}
+
+test('settings：合法偏好写回 200 并回显生效值', async () => {
+  const received = [];
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps(received)), async ({ port }) => {
+    const res = await postSettings(port, { disabledModels: ['flash'], defaultModel: 'pro' });
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.text);
+    assert.equal(body.ok, true);
+    assert.equal(body.persisted, true);
+    assert.deepEqual(body.disabled, ['flash']);
+    assert.equal(received.length, 1);
+    assert.deepEqual(received[0], { disabledModels: ['flash'], defaultModel: 'pro' });
+  });
+});
+
+test('settings：defaultModel 传 null（清除选择）必须放行', async () => {
+  const received = [];
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps(received)), async ({ port }) => {
+    const res = await postSettings(port, { defaultModel: null });
+    assert.equal(res.status, 200);
+    assert.deepEqual(received[0], { defaultModel: null });
+  });
+});
+
+test('settings：非环回 Host 被 403 拒绝（与状态端点同闸门）', async () => {
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps()), async ({ port }) => {
+    const res = await postSettings(port, { defaultModel: 'pro' }, {
+      ...SETTINGS_HEADERS,
+      host: 'evil.example.com',
+    });
+    assert.equal(res.status, 403);
+    assert.equal(JSON.parse(res.text).error, 'request-not-trusted');
+  });
+});
+
+test('settings：外部 Origin 被 403 拒绝', async () => {
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps()), async ({ port }) => {
+    const res = await postSettings(port, { defaultModel: 'pro' }, {
+      ...SETTINGS_HEADERS,
+      origin: 'https://evil.example.com',
+    });
+    assert.equal(res.status, 403);
+    assert.equal(JSON.parse(res.text).error, 'request-not-trusted');
+  });
+});
+
+test('settings：非 POST 方法被 405 拒绝', async () => {
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps()), async ({ port }) => {
+    const res = await rawRequest(port, { method: 'GET', path: QWENWORK_SETTINGS_PATH });
+    assert.equal(res.status, 405);
+  });
+});
+
+test('settings：非法字段 / 未知字段 / 空载荷一律 400', async () => {
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps()), async ({ port }) => {
+    for (const body of [
+      { token: 'hunter2' }, // 白名单外的字段，红线守卫生效
+      { disabledModels: ['flash'], evil: true },
+      {},
+    ]) {
+      const res = await postSettings(port, body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+      assert.equal(JSON.parse(res.text).error, 'invalid fields');
+    }
+  });
+});
+
+test('settings：类型错误 400（disabledModels 非数组 / defaultModel 非串非 null）', async () => {
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps()), async ({ port }) => {
+    const badType = await postSettings(port, { disabledModels: 'flash' });
+    assert.equal(badType.status, 400);
+    assert.equal(JSON.parse(badType.text).error, 'disabledModels must be an array');
+
+    const badDefault = await postSettings(port, { defaultModel: 7 });
+    assert.equal(badDefault.status, 400);
+    assert.equal(JSON.parse(badDefault.text).error, 'defaultModel must be a string or null');
+  });
+});
+
+test('settings：非法 JSON / 载荷不是对象 400', async () => {
+  await withServer(qwenWorkSettingsHandler(makeSettingsDeps()), async ({ port }) => {
+    const notJson = await postSettings(port, '{not-json');
+    assert.equal(notJson.status, 400);
+    assert.equal(JSON.parse(notJson.text).error, 'invalid json');
+
+    for (const body of ['null', '[1,2]', '"str"']) {
+      const res = await postSettings(port, body);
+      assert.equal(res.status, 400, body);
+      assert.equal(JSON.parse(res.text).error, 'invalid payload');
+    }
+  });
+});
+
+test('settings：setPreferences 抛错时 500 且错误经 safeMessage 脱敏', async () => {
+  let received = null;
+  const handler = qwenWorkSettingsHandler({
+    setPreferences: () => {
+      throw new Error('write failed: bearer abc.def');
+    },
+  });
+  await withServer(handler, async ({ port }) => {
+    const res = await postSettings(port, { defaultModel: 'pro' });
+    assert.equal(res.status, 500);
+    const text = res.text;
+    assert.ok(!text.includes('abc.def'), '500 里的错误文本必须脱敏');
+  });
+  assert.equal(received, null);
+});
+
+test('registerQwenWorkStatusRoute：只在提供 setPreferences 时挂 settings 路由', () => {
+  const mounts = [];
+  const ctx = {
+    webServer: { register(route) { mounts.push(route); return () => {}; } },
+  };
+  registerQwenWorkStatusRoute(ctx, makeDeps());
+  assert.equal(mounts.some((r) => r.path === QWENWORK_SETTINGS_PATH), false, '无首选项注入不加写回端点');
+
+  mounts.length = 0;
+  registerQwenWorkStatusRoute(ctx, { ...makeDeps(), setPreferences: () => ({}) });
+  assert.equal(mounts.some((r) => r.path === QWENWORK_SETTINGS_PATH), true, '有首选项注入才注册写回端点');
 });

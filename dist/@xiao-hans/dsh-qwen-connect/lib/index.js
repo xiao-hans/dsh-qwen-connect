@@ -17,16 +17,20 @@ import { createProvider } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai';
 import { resolveRetryPolicy, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm';
-import z from '@deepseek-ai/schemastery';
 
 import {
   FALLBACK_QWENWORK_MODELS,
   QWENWORK_PROVIDER,
   catalogForCard,
-  getActiveCatalog,
+  preferredCatalog,
   getCatalogMeta,
+  setModelPreferences,
   toPiModel,
 } from './models.js';
+import {
+  loadModelPreferences,
+  updateModelPreferences,
+} from './settings-store.js';
 import { createCatalogRefresher } from './model-catalog.js';
 import {
   getAccountContext,
@@ -137,11 +141,27 @@ function imageDepsFrom(ctx) {
  * 而 apply() 永远不得抛）。凭据每次拉取现取，因此登录态变化无需重建。
  */
 let catalogRefresher = null;
+/**
+ * 目录刷新成功后的宿主通知回调（由 apply() 注入）。
+ *
+ * 刷新器是模块级单例、且构造早于 adapter 的 `invalidate` 存在，所以用可变的
+ * 模块级函数接缝：apply() 拿到 `invalidate` 与 `ctx` 后把它替换成真正的
+ * 「重建 profiles + 通知宿主重读模型列表」动作。这里包一层不变，是为了让
+ * `createCatalogRefresher` 的 `onCatalogChanged` 永远指向同一个稳定引用。
+ */
+let notifyCatalogChanged = null;
 function getCatalogRefresher(logger) {
   if (catalogRefresher === null) {
     catalogRefresher = createCatalogRefresher({
       getCredential: getValidCredential,
       ...(logger === undefined ? {} : { logger }),
+      onCatalogChanged: () => {
+        try {
+          notifyCatalogChanged?.();
+        } catch {
+          /* 通知失败不影响目录已更新 */
+        }
+      },
     });
   }
   return catalogRefresher;
@@ -173,7 +193,7 @@ function createQwenWorkAdapter(getBaseUrl, getSharedSecret, image = {}) {
     } catch {
       /* 刷新器不可用不影响目录返回 */
     }
-    return getActiveCatalog().map((info) =>
+    return preferredCatalog().map((info) =>
       toPiModel(info, getBaseUrl(), { supportsImages: imagesAvailable }),
     );
   };
@@ -366,6 +386,31 @@ export function chatShimSharedSecret() {
  * @param {any} config
  */
 export function apply(ctx, config) {
+  // ---- 模型偏好（开关 / 默认项）先于一切装载 ---------------------------
+  // provider 注册与卡片都要读到同一份偏好，因此在 apply() 开头装载。
+  // 读盘失败退化成「全部启用 + 无用户默认」——绝不影响 provider 注册。
+  let applyPreferences = () => {};
+  try {
+    const prefs = loadModelPreferences();
+    applyPreferences = (values) =>
+      setModelPreferences({
+        disabled: values?.disabled,
+        defaultModel: values?.defaultModel,
+      });
+    applyPreferences(prefs);
+  } catch (error) {
+    ctx.logger?.warn?.('dsh-qwen-connect: model preferences unavailable', error);
+  }
+
+  /**
+   * 偏好变更后让宿主重读模型列表。与目录刷新同一条链路（见下方
+   * notifyCatalogChanged）：关掉的模型必须立刻从选择器消失，否则「开关」
+   * 只是卡片上的装饰。
+   */
+  const onPreferencesChanged = () => {
+    notifyCatalogChanged?.();
+  };
+
   // ---- 设置卡片数据源 ------------------------------------------------
   // 无论 provider 是否注册成功，卡片都要能显示——它是阶段 B 的主要可见成果。
   ctx.inject(['webServer'], (webCtx) => {
@@ -382,21 +427,24 @@ export function apply(ctx, config) {
       // 上游实测性能（首 token 延迟 / 输出速率）——由 shim 采样累积。
       perf: perfSummary,
       provider: QWENWORK_PROVIDER,
+      // 偏好写回：落盘 + 生效 + 通知宿主，三步在一个动作里完成。
+      setPreferences: (patch) => {
+        const saved = updateModelPreferences(patch, {
+          apply: applyPreferences,
+          logger: ctx.logger,
+        });
+        onPreferencesChanged();
+        return { persisted: saved.persisted, ...saved.values };
+      },
     });
   });
 
-  // ---- 设置命名空间（卡片配置面） -------------------------------------
-  const Config = z.object({});
-  ctx.inject(['settings'], (settingsCtx) => {
-    try {
-      settingsCtx.settings.installSection(ctx, QWENWORK_SETTINGS_NS, Config, config ?? {}, {
-        setSource() {},
-        onChange() {},
-      });
-    } catch (error) {
-      ctx.logger?.warn('dsh-qwen-connect: settings section unavailable', error);
-    }
-  });
+  // ---- 设置持久化：自持 settings.json（见 lib/settings-store.js） ------
+  // 不走宿主的配置写回：宿主 0.1.7 起已删除 installSection（本插件此前每次
+  // 调用都在抛 TypeError，被 try/catch 吞掉，等于从未生效）；现役的
+  // settings.update 会把偏好写进 profile 的 cordis.patch.yml，且字段须标
+  // .volatile()。模型开关是高频点击，自持文件更轻、更可控，也避免 profile
+  // patch 膨胀。装载点在 apply() 开头（loadModelPreferences → models.js）。
 
   // ---- 「只说不做」自动续跑守卫 ----------------------------------------
   // 挂在 agent/turn-stopping 上，仅对 provider === 'qwenwork' 的轮次生效。
@@ -434,7 +482,7 @@ export function apply(ctx, config) {
     });
 
   try {
-    const { adapter } = createQwenWorkAdapter(
+    const { adapter, invalidate } = createQwenWorkAdapter(
       () => shimBaseUrl ?? SHIM_UNAVAILABLE_BASE_URL,
       // 等待 shim 就绪后再取密钥：apply() 里的 ensureChatShim() 是异步的，
       // 而 pi-ai 可能在它就绪前就调用 resolveApiKey。返回 null 会让请求
@@ -449,6 +497,24 @@ export function apply(ctx, config) {
       // image（见 resolveImageSupport），保证「声明」与「能力」始终一致。
       imageDepsFrom(ctx),
     );
+    // 目录刷新成功后，把「重建 profiles + 通知宿主重读列表」挂到刷新器上。
+    // 缺一不可：
+    //   - invalidate() 让 PiAiAdapter 的 profiles Map 换新身份，逼其重建
+    //     快照并重新 setProvider（否则 memoized snapshot 里是旧目录）；
+    //   - ctx.emit('llm/adapters-updated') 让宿主选择器真的发起一次重读。
+    // 这正是 dsh-qoder-connect 的同名机制。
+    notifyCatalogChanged = () => {
+      try {
+        invalidate();
+      } catch (error) {
+        ctx.logger?.warn?.('dsh-qwen-connect: invalidate after catalog change failed', error);
+      }
+      try {
+        if (typeof ctx.emit === 'function') ctx.emit('llm/adapters-updated');
+      } catch (error) {
+        ctx.logger?.warn?.('dsh-qwen-connect: emit adapters-updated failed', error);
+      }
+    };
     let releaseAdapter;
     let releaseDirectory;
     try {
@@ -466,16 +532,19 @@ export function apply(ctx, config) {
       if (releaseAdapter === undefined || releaseDirectory === undefined) {
         releaseAdapter?.();
         releaseDirectory?.();
+        notifyCatalogChanged = null;
       }
     }
     try {
       ctx.effect(() => () => {
         releaseAdapter?.();
         releaseDirectory?.();
+        notifyCatalogChanged = null;
       });
     } catch {
       releaseAdapter?.();
       releaseDirectory?.();
+      notifyCatalogChanged = null;
     }
     ctx.logger?.info?.('dsh-qwen-connect: qwenwork provider registered (phase A-2, shim-backed)');
   } catch (error) {

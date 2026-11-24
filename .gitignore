@@ -1,1 +1,9 @@
 tmp/
+
+# AI/agent 生成物：均为本机脚手架，不入版本库
+# .claude/skills 是 mklink /J 目录联接（基准在 .agents/skills）；git 在 Windows 会把联接解引用成重复文件
+.claude/
+# project-agents-md skill 装入的本机技能副本（重新克隆后需重跑 skill 第 4 步复原）
+.agents/
+# DSH 运行时数据（dashboard 索引等）
+.pi/
